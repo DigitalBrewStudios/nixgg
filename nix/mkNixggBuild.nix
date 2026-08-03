@@ -39,9 +39,15 @@
   # decide when to call submit-output.
   target,
   # Extra store paths the user's command needs at build time —
-  # `pkg-config`, `perl`, whatever. Passed as inputs.srcs on the
-  # outer drv.
+  # `pkg-config`, `perl`, whatever. Each is on PATH via its /bin.
   extraToolchain ? [ ],
+  # Libraries + headers the build links against. Each is scanned
+  # for /include and /lib subdirs; found dirs get injected into
+  # NIX_CFLAGS_COMPILE (-isystem) and NIX_LDFLAGS (-L / -rpath) so
+  # the pinned gcc-wrapper picks them up. This is the same
+  # convention nixpkgs's stdenv uses; without it, autoconf link
+  # probes like `-lz` can't find their target.
+  buildInputs ? [ ],
 }:
 
 let
@@ -75,6 +81,17 @@ let
     ]
     ++ builtins.map (p: "${p}/bin") extraToolchain;
 
+  # Emit -isystem <pkg>/include and -L<pkg>/lib -rpath <pkg>/lib for
+  # each buildInput. gcc-wrapper picks these up via NIX_CFLAGS_COMPILE
+  # and NIX_LDFLAGS. Note: we don't stat the paths at eval time — Nix
+  # can't in pure-eval mode — so we emit flags for every input.
+  # gcc silently ignores -I / -L / -rpath pointing at nonexistent
+  # dirs, so this is fine.
+  cflagsFromBuildInputs = lib.concatStringsSep " "
+    (builtins.map (p: "-isystem ${p}/include") buildInputs);
+  ldflagsFromBuildInputs = lib.concatStringsSep " "
+    (builtins.map (p: "-L${p}/lib -rpath ${p}/lib") buildInputs);
+
   shimBins = [
     "${nixgg}/bin"
     "${nixgg}/shims"
@@ -90,6 +107,25 @@ let
     # vars gives Nix the string context it needs to mount them.
     PATH = lib.concatStringsSep ":" (shimBins ++ toolchainBins);
     NIXGG_TOOLCHAIN_PATH = lib.concatStringsSep ":" toolchainBins;
+
+    # gcc-wrapper env for buildInputs. gcc-wrapper's setup-hook
+    # only activates its NIX_LDFLAGS/NIX_CFLAGS_COMPILE handling
+    # when NIX_CC_WRAPPER_TARGET_HOST_<triple>=1 is present. Set
+    # the trigger + both the plain and triple-suffixed variants so
+    # the wrapper picks them up either way.
+    #
+    # If we later capture these into wrapperEnv on the shim's
+    # Derivation struct, both native and sandbox drvs will pick
+    # them up; for now they only affect the outer mkNixggBuild
+    # derivation's shell (configure phase).
+    NIX_CC_WRAPPER_TARGET_HOST_x86_64_unknown_linux_gnu = "1";
+    NIX_CFLAGS_COMPILE = cflagsFromBuildInputs;
+    NIX_CFLAGS_COMPILE_x86_64_unknown_linux_gnu = cflagsFromBuildInputs;
+    NIX_LDFLAGS = ldflagsFromBuildInputs;
+    NIX_LDFLAGS_x86_64_unknown_linux_gnu = ldflagsFromBuildInputs;
+    # pkg-config wrapper reads this to find .pc files.
+    PKG_CONFIG_PATH = lib.concatStringsSep ":"
+      (builtins.map (p: "${p}/lib/pkgconfig") buildInputs);
 
     # NIXGG_* the shims read.
     NIXGG_ROOT          = "${nixgg}";

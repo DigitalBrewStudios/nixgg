@@ -228,8 +228,13 @@
             inherit mkNixggBuild;
             inherit (pkgs)
               autoconf automake libtool pkg-config perl protobuf which
-              gnum4 gnugrep gnused gawk file
-              ncurses openssl zlib;
+              gnum4 gnugrep gnused gawk file;
+            # Pass both .dev (headers) and .out (libs) outputs for
+            # the multi-output packages autoconf's link probes need.
+            ncurses = [ pkgs.ncurses.dev pkgs.ncurses ];
+            openssl = [ pkgs.openssl.dev pkgs.openssl.out ];
+            zlib    = [ pkgs.zlib.dev pkgs.zlib.out ];
+            protobuf-lib = pkgs.protobuf;
             src = mosh-src;
           }).result;
         in
