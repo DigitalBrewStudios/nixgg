@@ -27,12 +27,18 @@ here="$(cd "$(dirname "$0")" && pwd)"
 nixgg_root="$(cd "$here/.." && pwd)"
 
 ALT_STORE="${ALT_STORE:-/tmp/nixgg-equiv-store}"
-PATCHED_NIX="${PATCHED_NIX:-$nixgg_root/../builder-rpc-v0/patched-nix}"
 
+# Path to a builder-rpc-v0-capable nix (i.e. NixOS/nix master or the
+# PR-15793 branch). Default: build via the flake and link alongside
+# the test. Override PATCHED_NIX=/path/to/nix-root to reuse.
+PATCHED_NIX="${PATCHED_NIX:-$nixgg_root/.patched-nix}"
 if [[ ! -x "$PATCHED_NIX/bin/nix" ]]; then
-  echo "PATCHED_NIX/bin/nix not found: $PATCHED_NIX" >&2
-  echo "Build via: nix build $nixgg_root#patched-nix -o $nixgg_root/../builder-rpc-v0/patched-nix" >&2
-  exit 2
+  echo "==> building patched nix (one-time; substituted from cache)" >&2
+  nix build --no-eval-cache "$nixgg_root#patched-nix" \
+    -o "$PATCHED_NIX" >&2 || {
+      echo "failed to build $nixgg_root#patched-nix" >&2
+      exit 2
+    }
 fi
 
 # ---------- 1. clean alt store ----------
@@ -73,10 +79,24 @@ strip_prefix() { echo "${1#$ALT_STORE}"; }
 
 sb_main=$(strip_prefix "$(ls "$ALT_STORE"/nix/store/*tu-main.o.drv 2>/dev/null | head -1)")
 sb_util=$(strip_prefix "$(ls "$ALT_STORE"/nix/store/*tu-util.o.drv 2>/dev/null | head -1)")
-# Two bin-hello.drv exist per successful build: one with drv inputs
-# (dyn-drv, unresolved) and one after resolution. The unresolved form
-# is what `nix-instantiate` on native's link thunk produces.
-sb_link=$(strip_prefix "$(ls "$ALT_STORE"/nix/store/*bin-hello.drv 2>/dev/null | grep -v '\.drv\.drv$' | sort | head -1)")
+# Two bin-hello.drv exist per successful build: the "unresolved" one
+# our sandbox shim submitted (references inputs via inputDrvs) and the
+# "resolved" variant Nix rewrites during dyn-drv realisation
+# (dereferences inputDrvs into inputSrcs). Native `nix-instantiate`
+# produces the unresolved form; that's what we want to compare against.
+# Distinguish by grepping for a .drv reference in the second aterm
+# position (inputDrvs is the second `[…]` bracket).
+sb_link=""
+for f in "$ALT_STORE"/nix/store/*bin-hello.drv; do
+  [[ "$f" == *.drv.drv ]] && continue
+  # Position 2 of Derive([outputs], [inputDrvs], [inputSrcs], …).
+  # Peek the raw aterm; inputDrvs is non-empty iff there's a .drv
+  # store path in position 2.
+  if head -c 400 "$f" | grep -q '\[("/nix/store/[^"]*\.drv"'; then
+    sb_link=$(strip_prefix "$f")
+    break
+  fi
+done
 
 printf '   sandbox drvs:\n'
 printf '     main:  %s\n' "$sb_main"
@@ -85,9 +105,11 @@ printf '     link:  %s\n' "$sb_link"
 
 # ---------- 3. native build via `make` in example/ ----------
 printf '==> native: nix develop -c make in example/\n'
-# Any preexisting .nixgg/ upstream of example/ is what auto-seed
-# picks; wipe both possible locations.
-rm -rf "$nixgg_root/../.nixgg" "$nixgg_root/example/.nixgg" \
+# Auto-seed lands .nixgg/ at the nearest git-root ancestor. In this
+# standalone repo that's the nixgg root itself; the parent-nixgg-in-
+# monorepo case would put it one dir up. Wipe both.
+rm -rf "$nixgg_root/.nixgg" "$nixgg_root/../.nixgg" \
+       "$nixgg_root/example/.nixgg" \
        "$nixgg_root/example/main.o" "$nixgg_root/example/util.o" \
        "$nixgg_root/example/hello" 2>/dev/null || true
 
@@ -102,10 +124,10 @@ rm -rf "$nixgg_root/../.nixgg" "$nixgg_root/example/.nixgg" \
   "
 ) 2>&1 | grep -E '^\[nixgg\]|error' || true
 
-# The auto-seed picks the repo git root, which lives one dir above
-# nixgg/ — so thunks may land at ../../.nixgg/thunks. Search both.
+# Find where thunks landed — auto-seed walks up to a .git ancestor.
 thunks_dir=""
 for candidate in \
+    "$nixgg_root/.nixgg/thunks" \
     "$nixgg_root/../.nixgg/thunks" \
     "$nixgg_root/example/.nixgg/thunks"; do
   if compgen -G "$candidate/*.nix" > /dev/null; then
