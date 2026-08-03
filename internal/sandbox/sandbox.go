@@ -97,21 +97,31 @@ func SubmitOutput(cfg *toolchain.Config, drvPath, outputName string) error {
 	return nil
 }
 
-// PointOutputAtDrv creates a symlink at `output` pointing at the drv
-// store path. The symlink acts as the sandbox-mode analogue of the
-// .nix-thunk symlink: it records "this output was produced by this
-// drv" in a way downstream shims can pick up.
+// DrvRefHeader is the magic-string prefix written at the start of a
+// sandbox-mode output file. Downstream shims (classify.Target) read
+// this to recover the producing drv path.
+const DrvRefHeader = "#!nixgg-drvref\n"
+
+// PointOutputAtDrv writes a regular file at `output` whose content
+// identifies the producing drv. The sandbox-mode analogue of the
+// native mode's ".nix-thunk symlink" — but a real file, not a
+// symlink, because builder-rpc-v0 doesn't materialise the target
+// .drv into the sandbox filesystem (the daemon holds it), so a
+// symlink → /nix/store/…-….drv would dangle and fail `test -e` in
+// downstream Makefile prerequisite checks (e.g. mosh's
+// `mosh-client: ../crypto/libmoshcrypto.a`).
 //
-// Also writes `<output>.name` — the basename inside the drv's output
-// dir that a subsequent link shim needs to reference (e.g. "hello.o"
-// so `${drv}/hello.o` builds correctly).
+// Format: magic header line + drv path + newline. The bang in the
+// magic makes it accidentally shellable ("cannot exec"), so if
+// something mis-invokes it as an executable, the error is obvious.
 func PointOutputAtDrv(output, drvPath string) error {
 	if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
 		return err
 	}
 	_ = os.Remove(output)
-	if err := os.Symlink(drvPath, output); err != nil {
-		return fmt.Errorf("symlink %s -> %s: %w", output, drvPath, err)
+	body := DrvRefHeader + drvPath + "\n"
+	if err := os.WriteFile(output, []byte(body), 0o644); err != nil {
+		return fmt.Errorf("write drvref %s -> %s: %w", output, drvPath, err)
 	}
 	return nil
 }

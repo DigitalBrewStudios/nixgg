@@ -37,9 +37,6 @@ var bases = []string{
 func JSON() (string, error) {
 	triple := detectTriple()
 	kv := map[string]string{}
-	if triple != "" {
-		kv["NIX_CC_WRAPPER_TARGET_HOST_"+triple] = "1"
-	}
 	for _, base := range bases {
 		val := os.Getenv(base)
 		if triple != "" {
@@ -55,6 +52,15 @@ func JSON() (string, error) {
 			continue
 		}
 		kv[base] = val
+	}
+	// Only emit the activation trigger when we actually have wrapper
+	// flags to activate on. Empty-buildInputs builds (hello, lua) have
+	// no NIX_CFLAGS_COMPILE / NIX_LDFLAGS at all, and native
+	// (mkShellNoCC) doesn't set the trigger either — so this keeps
+	// sandbox/native drv-hashes in sync while still letting real
+	// buildInputs activate the inner wrapper.
+	if triple != "" && len(kv) > 0 {
+		kv["NIX_CC_WRAPPER_TARGET_HOST_"+triple] = "1"
 	}
 	if len(kv) == 0 {
 		return "{}", nil

@@ -88,7 +88,14 @@ func Target(path, altStorePrefix string, l paths.Layout) Result {
 		return Result{Kind: Regular}
 	}
 	if info.Mode()&os.ModeSymlink == 0 {
-		// Regular file on disk. Was it promoted from a store output?
+		// Regular file on disk. Could be:
+		//   1. A sandbox-mode drvref stub: magic header + drv path.
+		//      Written by sandbox.PointOutputAtDrv (see docstring).
+		//   2. A "promoted" store output (force copied bytes here).
+		//   3. Genuinely a regular file.
+		if ref := readDrvRef(path); ref != "" {
+			return Result{Kind: Drv, Ref: ref}
+		}
 		if l.Promoted != "" {
 			if info := thunk.LookupPromoted(l, path); info != nil {
 				return Result{Kind: Store, Ref: info.StorePath, ThunkID: string(info.ThunkID)}
@@ -133,6 +140,29 @@ func storeRootOf(p string) string {
 		rest = rest[:slash]
 	}
 	return "/nix/store/" + rest
+}
+
+// readDrvRef reads the first ~1KB of a regular file and returns the
+// referenced drv store path if the file is a sandbox-mode drvref stub
+// (see sandbox.PointOutputAtDrv). Empty string means "not a drvref".
+func readDrvRef(path string) string {
+	const magic = "#!nixgg-drvref\n"
+	f, err := os.Open(path)
+	if err != nil {
+		return ""
+	}
+	defer f.Close()
+	buf := make([]byte, 1024)
+	n, _ := f.Read(buf)
+	body := string(buf[:n])
+	if !strings.HasPrefix(body, magic) {
+		return ""
+	}
+	rest := body[len(magic):]
+	if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
+		rest = rest[:nl]
+	}
+	return rest
 }
 
 // readlinkFollow returns the final resolved target. We use EvalSymlinks

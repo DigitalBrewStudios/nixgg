@@ -136,7 +136,11 @@ let
       #     Per-run and per-path, so poisonous to CA-hash stability.
       unset NIX_HARDENING_ENABLE
       unset CC CXX LD AR RANLIB NM STRIP OBJCOPY OBJDUMP READELF SIZE
-      for v in ''${!NIX_CC_WRAPPER_TARGET_HOST_@}; do unset "$v"; done
+      # NIX_CC_WRAPPER_TARGET_HOST_<triple> stays: bypass-mode configure
+      # steps exec-passthrough to the outer gcc-wrapper, which needs
+      # the trigger to inject buildInputs -isystem / -L. wrapperenv
+      # gates propagation to the inner drv on non-empty flags, so
+      # empty-buildInputs builds still hash identically to native.
       NIX_CFLAGS_COMPILE=$(printf '%s' "''${NIX_CFLAGS_COMPILE:-}" | sed -e 's| *-frandom-seed=[^ ]*||g')
       NIX_LDFLAGS=$(printf '%s' "''${NIX_LDFLAGS:-}" | sed -e 's| *-rpath /nonexistent/lib||g')
       export NIX_CFLAGS_COMPILE NIX_LDFLAGS
