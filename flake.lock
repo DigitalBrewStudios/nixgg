@@ -37,6 +37,23 @@
         "type": "github"
       }
     },
+    "fmt-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1721485058,
+        "narHash": "sha256-IKNt4xUoVi750zBti5iJJcCk3zivTt7nU12RIf8pM+0=",
+        "owner": "fmtlib",
+        "repo": "fmt",
+        "rev": "0c9fce2ffefecfdce794e1859584e25877b7b592",
+        "type": "github"
+      },
+      "original": {
+        "owner": "fmtlib",
+        "ref": "11.0.2",
+        "repo": "fmt",
+        "type": "github"
+      }
+    },
     "git-hooks-nix": {
       "inputs": {
         "flake-compat": [
@@ -58,6 +75,35 @@
       "original": {
         "owner": "cachix",
         "repo": "git-hooks.nix",
+        "type": "github"
+      }
+    },
+    "lua-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1718316991,
+        "narHash": "sha256-o1jnQCcnlk2OXU4Cc8X7bJiOU2QN92vd91TtBhNM/hU=",
+        "type": "tarball",
+        "url": "https://www.lua.org/ftp/lua-5.4.7.tar.gz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://www.lua.org/ftp/lua-5.4.7.tar.gz"
+      }
+    },
+    "mosh-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1774210813,
+        "narHash": "sha256-SsIj2JCDw7qkJ0NiX0FEQVYM0ATFpC9O/m7jycri0nU=",
+        "owner": "mobile-shell",
+        "repo": "mosh",
+        "rev": "decd9b705eb81626f694335b8d5940538beb06da",
+        "type": "github"
+      },
+      "original": {
+        "owner": "mobile-shell",
+        "repo": "mosh",
         "type": "github"
       }
     },
@@ -147,6 +193,9 @@
     },
     "root": {
       "inputs": {
+        "fmt-src": "fmt-src",
+        "lua-src": "lua-src",
+        "mosh-src": "mosh-src",
         "nix-15793": "nix-15793",
         "nixpkgs": "nixpkgs_2"
       }

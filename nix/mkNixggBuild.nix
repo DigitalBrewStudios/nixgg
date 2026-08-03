@@ -45,14 +45,20 @@
 }:
 
 let
-  # The outer derivation's name must equal the .drv basename the link
-  # shim submits — Nix enforces submit-output's path-name matches
-  # outputPathName(outerName, "out"). Our link shim names drvs
-  # "bin-<target>.drv", so the outer must be named the same.
+  # The outer derivation's name must equal the .drv basename the shim
+  # submits — Nix enforces submit-output's path-name matches
+  # outputPathName(outerName, "out"). Prefix depends on which shim
+  # produces the target: `bin-<target>` for link-produced binaries,
+  # `ar-<target>` for archive-produced static libs (autodetected by
+  # target extension).
   #
   # Downside: multiple mkNixggBuild calls with the same target
   # basename will collide. Consumers must pass distinct targets.
-  name = "bin-${baseNameOf target}.drv";
+  targetBase = baseNameOf target;
+  targetPrefix =
+    if lib.hasSuffix ".a" targetBase then "ar-"
+    else "bin-";
+  name = "${targetPrefix}${targetBase}.drv";
 
   drv = derivation {
   inherit name;

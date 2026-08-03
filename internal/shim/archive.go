@@ -2,6 +2,7 @@ package shim
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 
@@ -203,6 +204,18 @@ func archiveSandbox(
 		return err
 	}
 	logf("  drv:        %s", drvPath)
+
+	// Archives are usually intermediate, but a build whose final
+	// artifact is a static library (fmt: libfmt.a, no link step) needs
+	// the archive drv itself submitted as the outer output. Submit iff
+	// this matches NIXGG_SANDBOX_TARGET — same rule the link shim uses.
+	if target := os.Getenv("NIXGG_SANDBOX_TARGET"); target != "" && matchesTarget(target, archive) {
+		if err := sandbox.SubmitOutput(cfg, drvPath, "out"); err != nil {
+			logf("  submit-output: %v", err)
+		} else {
+			logf("  submitted: %s", drvPath)
+		}
+	}
 	return nil
 }
 

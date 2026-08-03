@@ -30,8 +30,24 @@
     url = "github:NixOS/nix";
   };
 
+  # Sources for the example builds. `flake = false` because these are
+  # plain source trees, not nix flakes. Each is passed as `src` to
+  # the matching examples/<name>/default.nix.
+  inputs.lua-src = {
+    url = "https://www.lua.org/ftp/lua-5.4.7.tar.gz";
+    flake = false;
+  };
+  inputs.fmt-src = {
+    url = "github:fmtlib/fmt/11.0.2";
+    flake = false;
+  };
+  inputs.mosh-src = {
+    url = "github:mobile-shell/mosh";
+    flake = false;
+  };
+
   outputs =
-    { self, nixpkgs, nix-15793 }:
+    { self, nixpkgs, nix-15793, lua-src, fmt-src, mosh-src }:
     let
       forEachSystem = f: builtins.mapAttrs (system: pkgs: f system pkgs) nixpkgs.legacyPackages;
     in
@@ -191,9 +207,30 @@
             inherit (pkgs) lib;
           }).result;
 
-          lua = (import ./dyn-drv/lua-mkbuild.nix {
+          # Three out-of-tree examples driven from flake inputs. Each
+          # is a `mkNixggBuild` call site with its source pinned in
+          # flake.lock. `nix build .#lua` builds the sandbox version;
+          # native equivalence — same drv hashes when the shims run
+          # under a plain `nix develop -c make` in an extracted src
+          # tree — is pinned by tests/drv-equivalence.sh.
+          lua = (import ./examples/lua {
             inherit mkNixggBuild;
-            inherit (pkgs) fetchurl stdenv;
+            src = lua-src;
+          }).result;
+
+          fmt = (import ./examples/fmt {
+            inherit mkNixggBuild;
+            inherit (pkgs) cmake ninja pkg-config;
+            src = fmt-src;
+          }).result;
+
+          mosh = (import ./examples/mosh {
+            inherit mkNixggBuild;
+            inherit (pkgs)
+              autoconf automake libtool pkg-config perl protobuf which
+              gnum4 gnugrep gnused gawk file
+              ncurses openssl zlib;
+            src = mosh-src;
           }).result;
         in
         toolchain
@@ -207,7 +244,7 @@
           # mkNixggBuild is a function; expose so consumers can build
           # their own targets in downstream flakes.
           inherit mkNixggBuild;
-          inherit hello lua;
+          inherit hello lua fmt mosh;
           default = envShell;
         }
       );
