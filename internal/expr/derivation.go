@@ -138,12 +138,15 @@ mkdir -p "$out"
 "%s" %s %s -o "$out/%s"
 `, pathPrefix, d.Tool, shellQuoteFlags(d.Flags), d.linkerInputs(), d.OutName)
 	case KindArchive:
+		// Native's archiver.nix uses bare `ar` (from PATH) with `D`
+		// prepended to arFlags (see nix/archiver.nix). Mirror that
+		// exactly so drv hashes match.
 		return fmt.Sprintf(
 			`set -euo pipefail
 %s
 mkdir -p "$out"
-"%s/bin/ar" '%s' "$out/%s" %s
-`, pathPrefix, d.AR, d.ARFlags, d.OutName, d.linkerInputs())
+ar D%s "$out/%s" %s
+`, pathPrefix, d.ARFlags, d.OutName, d.linkerInputs())
 	}
 	return ""
 }

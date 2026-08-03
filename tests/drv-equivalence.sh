@@ -1,25 +1,24 @@
 #!/usr/bin/env bash
-# Regression test: native and sandbox modes must produce byte-identical
+# Regression test: native and sandbox modes produce byte-identical
 # .drv files for the same source.
 #
-# Fixture is nixgg/example/ — a two-TU project (main.cc + util.cc)
-# with a Makefile. Both:
+# Runs each fixture two ways:
 #
-#   native:   `nix develop . -c make` in example/ (writes .nix thunks,
-#             then nix-instantiate → drv path)
-#   sandbox:  `nix build .#hello`      (nix derivation add via
-#             builder-rpc-v0 daemon RPC)
+#   sandbox:  `nix build .#<attr>`     — JSON drv → nix derivation add
+#   native:   fetch same source, unpack into a tempdir, `nix develop`
+#             and run the same buildCommand there. Shims write .nix
+#             thunks; nix-instantiate on each thunk → drv path.
 #
-# should hit the same three drv paths: tu-main.o, tu-util.o, bin-hello.
-# If they diverge, one code path drifted; check the recent commits
-# touching internal/expr/, internal/shim/compile.go, or
-# internal/shim/link.go.
+# Compare the SET of drv-hashes produced. If native and sandbox agree
+# on every drv-hash, the mode-independent Derivation representation
+# is doing its job.
 #
 # Env knobs:
-#   ALT_STORE   root of the alternate store (default /tmp/nixgg-equiv-store)
-#   PATCHED_NIX explicit path to a nix built from PR-15793-era master
-#               (default: /home/…/builder-rpc-v0/patched-nix)
-#   KEEP_STORE  set to 1 to skip wiping ALT_STORE at start
+#   ALT_STORE      root of the alt store (default /tmp/nixgg-equiv-store)
+#   PATCHED_NIX    path to a builder-rpc-v0-capable nix
+#                  (default: ./.patched-nix, built from flake if missing)
+#   KEEP_STORE=1   don't wipe ALT_STORE at start (for local iteration)
+#   ONLY=name      only run one fixture (hello / lua / fmt / …)
 
 set -euo pipefail
 
@@ -27,10 +26,6 @@ here="$(cd "$(dirname "$0")" && pwd)"
 nixgg_root="$(cd "$here/.." && pwd)"
 
 ALT_STORE="${ALT_STORE:-/tmp/nixgg-equiv-store}"
-
-# Path to a builder-rpc-v0-capable nix (i.e. NixOS/nix master or the
-# PR-15793 branch). Default: build via the flake and link alongside
-# the test. Override PATCHED_NIX=/path/to/nix-root to reuse.
 PATCHED_NIX="${PATCHED_NIX:-$nixgg_root/.patched-nix}"
 if [[ ! -x "$PATCHED_NIX/bin/nix" ]]; then
   echo "==> building patched nix (one-time; substituted from cache)" >&2
@@ -41,7 +36,6 @@ if [[ ! -x "$PATCHED_NIX/bin/nix" ]]; then
     }
 fi
 
-# ---------- 1. clean alt store ----------
 if [[ "${KEEP_STORE:-}" != "1" ]]; then
   chmod -R u+w "$ALT_STORE" 2>/dev/null || true
   rm -rf "$ALT_STORE"
@@ -55,130 +49,200 @@ extra-system-features = builder-rpc-v0
 store = local?root=$ALT_STORE
 "
 
-# Seed the alt store with patched-nix (it's the builder for the outer
-# `.drv.drv` derivation, so needs to be reachable).
-if [[ ! -e "$ALT_STORE/$(readlink -f "$PATCHED_NIX" | sed s,^/nix/store,/nix/store,)" ]]; then
+# Seed alt store with patched-nix so the outer .drv.drv can be built.
+if [[ ! -e "$ALT_STORE/$(readlink -f "$PATCHED_NIX")" ]]; then
   "$PATCHED_NIX/bin/nix" copy --from daemon --to "local?root=$ALT_STORE" \
       --no-check-sigs "$(readlink -f "$PATCHED_NIX")" >/dev/null 2>&1 || true
 fi
 
-# ---------- 2. sandbox build via .#hello ----------
-printf '==> sandbox: nix build .#hello\n'
-"$PATCHED_NIX/bin/nix" build --no-eval-cache --no-link \
-  --print-out-paths "$nixgg_root#hello" \
-  > /tmp/nixgg-equiv-sandbox.log 2>&1 || {
-    echo "sandbox build failed; see /tmp/nixgg-equiv-sandbox.log:" >&2
-    tail -20 /tmp/nixgg-equiv-sandbox.log >&2
-    exit 4
+# ---------------------------------------------------------------
+# Fixtures. Each entry is:
+#
+#   attr | native-src-flake-input | native-src-subdir | build-cmd
+#
+# - attr:        the flake attribute to `nix build`
+# - native-src:  either a flake-input attr name (e.g. "lua-src") for
+#                the same tarball the sandbox pulls in, or "example"
+#                (path-relative to nixgg_root) for the local example
+# - native-src-subdir: cd into this dir inside the unpacked src
+#                (empty = src root)
+# - build-cmd:   what to run in the src dir under `nix develop`
+# ---------------------------------------------------------------
+run_fixture() {
+  local attr="$1" src_input="$2" subdir="$3" build_cmd="$4"
+  local label="$attr"
+
+  echo
+  printf '\033[1;36m===== %s =====\033[0m\n' "$label"
+
+  # -- 1. sandbox build --
+  # Snapshot the store *before* this fixture so we can compute
+  # newly-added drvs afterward. Running multiple fixtures against
+  # a single alt store (--keep-store, or just fixture-i then
+  # fixture-i+1) would otherwise pollute the set.
+  local pre_snap; pre_snap=$(ls "$ALT_STORE"/nix/store/ 2>/dev/null | sort)
+
+  local sb_log="/tmp/nixgg-equiv-$attr-sandbox.log"
+  printf '==> sandbox: nix build .#%s\n' "$attr"
+  "$PATCHED_NIX/bin/nix" build --no-eval-cache --no-link \
+    --print-out-paths "$nixgg_root#$attr" \
+    > "$sb_log" 2>&1 || {
+      echo "sandbox build failed; see $sb_log:" >&2
+      tail -20 "$sb_log" >&2
+      return 1
+    }
+
+  # Set of drv hashes the sandbox produced. Filter:
+  #   - tu-*.o.drv + ar-*.a.drv + bin-*.drv (nixgg-emitted)
+  #   - drop the outer .drv.drv wrapper (text-mode drv-producing)
+  #   - drop RESOLVED variants: when Nix builds the outer .drv.drv,
+  #     it rewrites each inner drv from inputDrvs-form (references
+  #     other drvs by path) into inputSrcs-form (references the
+  #     resolved store outputs). The former is what our shim
+  #     emitted; the latter is Nix's rewrite. Native mode never
+  #     produces the rewritten variant, so exclude it here for a
+  #     like-for-like set comparison. Heuristic: the unresolved
+  #     form has *some* .drv path in the aterm's inputDrvs slot
+  #     (position 2, `[(…drv…)]`). The resolved form has `[]`
+  #     there.
+  local post_snap; post_snap=$(ls "$ALT_STORE"/nix/store/ 2>/dev/null | sort)
+  local new_paths; new_paths=$(comm -13 <(echo "$pre_snap") <(echo "$post_snap"))
+
+  local sb_drvs
+  sb_drvs=$(for base in $new_paths; do
+    local f="$ALT_STORE/nix/store/$base"
+    [[ ! -f "$f" ]] && continue
+    [[ "$base" == *.drv.drv ]] && continue
+    [[ ! "$base" =~ ^[a-z0-9]+-(tu-|ar-|bin-) ]] && continue
+    # Peek the aterm. bin-*/ar-* drvs typically reference at least
+    # one .drv in inputDrvs. tu-*.o.drv (compile) usually has an
+    # empty inputDrvs and non-empty inputSrcs (the staged src +
+    # toolchain), so we can't reject "empty inputDrvs" outright
+    # — instead, only drop resolved bin-/ar-* by name pattern
+    # (they always appear alongside the unresolved form, so we can
+    # dedup by keeping the LATER-created one? No — keep whichever
+    # references drvs in position 2).
+    if [[ "$base" =~ ^[a-z0-9]+-bin- || "$base" =~ ^[a-z0-9]+-ar- ]]; then
+      # bin-/ar- shim emits reference inputDrvs. If this drv has
+      # zero .drv refs in position 2, it's the resolved rewrite.
+      if ! head -c 500 "$f" | grep -q '\[("/nix/store/[^"]*\.drv"'; then
+        continue
+      fi
+    fi
+    echo "$base"
+  done | sort -u)
+
+  # -- 2. native build --
+  local workdir="$(mktemp -d)"
+  local src
+  if [[ "$src_input" == "example" ]]; then
+    src="$nixgg_root/example"
+  else
+    # Resolve the flake input's store path via `nix flake archive`.
+    # Outputs JSON like: {"inputs":{"lua-src":{"path":"/nix/store/…"}}}
+    src=$("$PATCHED_NIX/bin/nix" flake archive --json "$nixgg_root" 2>/dev/null \
+      | python3 -c "import sys,json; d=json.load(sys.stdin); print(d['inputs']['$src_input']['path'])" 2>/dev/null)
+  fi
+
+  if [[ -z "$src" || ! -e "$src" ]]; then
+    echo "could not resolve native src for $attr (input=$src_input)" >&2
+    return 1
+  fi
+
+  # Copy source, run the build. Store paths are read-only, so we
+  # need our own writable copy.
+  cp -a "$src"/. "$workdir/"
+  chmod -R u+w "$workdir"
+
+  # Wipe any pre-existing .nixgg/ that auto-seed might hit.
+  rm -rf "$workdir/.nixgg" 2>/dev/null || true
+
+  printf '==> native: nix develop -c <build> in %s\n' "$workdir/${subdir}"
+  local nt_log="/tmp/nixgg-equiv-$attr-native.log"
+  (
+    cd "$workdir/${subdir}"
+    nix develop "$nixgg_root" --command bash -c "
+      export NIXGG_STORE='local?root=$ALT_STORE'
+      export NIXGG_AUTOFORCE=0
+      $build_cmd
+    "
+  ) > "$nt_log" 2>&1 || {
+    echo "native build failed; see $nt_log:" >&2
+    tail -20 "$nt_log" >&2
+    return 1
   }
 
-# Strip the alt-store prefix so the reported paths match native's
-# canonical `/nix/store/…` form — the CA hash is what matters, not
-# where on disk the file lives.
-strip_prefix() { echo "${1#$ALT_STORE}"; }
-
-sb_main=$(strip_prefix "$(ls "$ALT_STORE"/nix/store/*tu-main.o.drv 2>/dev/null | head -1)")
-sb_util=$(strip_prefix "$(ls "$ALT_STORE"/nix/store/*tu-util.o.drv 2>/dev/null | head -1)")
-# Two bin-hello.drv exist per successful build: the "unresolved" one
-# our sandbox shim submitted (references inputs via inputDrvs) and the
-# "resolved" variant Nix rewrites during dyn-drv realisation
-# (dereferences inputDrvs into inputSrcs). Native `nix-instantiate`
-# produces the unresolved form; that's what we want to compare against.
-# Distinguish by grepping for a .drv reference in the second aterm
-# position (inputDrvs is the second `[…]` bracket).
-sb_link=""
-for f in "$ALT_STORE"/nix/store/*bin-hello.drv; do
-  [[ "$f" == *.drv.drv ]] && continue
-  # Position 2 of Derive([outputs], [inputDrvs], [inputSrcs], …).
-  # Peek the raw aterm; inputDrvs is non-empty iff there's a .drv
-  # store path in position 2.
-  if head -c 400 "$f" | grep -q '\[("/nix/store/[^"]*\.drv"'; then
-    sb_link=$(strip_prefix "$f")
-    break
+  # Find the thunks and nix-instantiate each. workdir may or may not
+  # be a git root — the auto-seed walks up to nearest `.git` and
+  # lands `.nixgg/` there.
+  local thunks_dir=""
+  for cand in \
+      "$workdir/.nixgg/thunks" \
+      "$workdir/${subdir}/.nixgg/thunks"; do
+    if compgen -G "$cand/*.nix" > /dev/null; then
+      thunks_dir="$cand"
+      break
+    fi
+  done
+  if [[ -z "$thunks_dir" ]]; then
+    echo "native build produced no thunks; see $nt_log" >&2
+    return 1
   fi
-done
 
-printf '   sandbox drvs:\n'
-printf '     main:  %s\n' "$sb_main"
-printf '     util:  %s\n' "$sb_util"
-printf '     link:  %s\n' "$sb_link"
+  local nt_drvs
+  nt_drvs=$(for t in "$thunks_dir"/*.nix; do
+    "$PATCHED_NIX/bin/nix" eval --no-eval-cache --impure --raw \
+      --file "$t" drvPath 2>/dev/null | xargs -n1 basename
+  done | sort -u)
 
-# ---------- 3. native build via `make` in example/ ----------
-printf '==> native: nix develop -c make in example/\n'
-# Auto-seed lands .nixgg/ at the nearest git-root ancestor. In this
-# standalone repo that's the nixgg root itself; the parent-nixgg-in-
-# monorepo case would put it one dir up. Wipe both.
-rm -rf "$nixgg_root/.nixgg" "$nixgg_root/../.nixgg" \
-       "$nixgg_root/example/.nixgg" \
-       "$nixgg_root/example/main.o" "$nixgg_root/example/util.o" \
-       "$nixgg_root/example/hello" 2>/dev/null || true
+  # -- 3. compare sets --
+  local only_sandbox only_native both
+  only_sandbox=$(comm -23 <(echo "$sb_drvs") <(echo "$nt_drvs"))
+  only_native=$(comm -13 <(echo "$sb_drvs") <(echo "$nt_drvs"))
+  both=$(comm -12 <(echo "$sb_drvs") <(echo "$nt_drvs"))
 
-(
-  cd "$nixgg_root/example"
-  # Use the flake's dev shell explicitly rather than the ambient one;
-  # ensures we pick up the same nixgg binary the flake ships.
-  nix develop "$nixgg_root" --command bash -c "
-    export NIXGG_STORE='local?root=$ALT_STORE'
-    export NIXGG_AUTOFORCE=0
-    make >/dev/null
-  "
-) 2>&1 | grep -E '^\[nixgg\]|error' || true
+  # Line counts. `wc -l` counts newlines; add 1 for content that
+  # doesn't end in \n. Simplest: filter empty lines then wc.
+  local n_both n_only_sb n_only_nt
+  n_both=$(printf '%s\n' "$both" | grep -c . || true)
+  n_only_sb=$(printf '%s\n' "$only_sandbox" | grep -c . || true)
+  n_only_nt=$(printf '%s\n' "$only_native" | grep -c . || true)
+  n_both=${n_both:-0}
+  n_only_sb=${n_only_sb:-0}
+  n_only_nt=${n_only_nt:-0}
 
-# Find where thunks landed — auto-seed walks up to a .git ancestor.
-thunks_dir=""
-for candidate in \
-    "$nixgg_root/.nixgg/thunks" \
-    "$nixgg_root/../.nixgg/thunks" \
-    "$nixgg_root/example/.nixgg/thunks"; do
-  if compgen -G "$candidate/*.nix" > /dev/null; then
-    thunks_dir="$candidate"
-    break
-  fi
-done
-if [[ -z "$thunks_dir" ]]; then
-  echo "native build produced no thunks; something is wrong" >&2
-  exit 3
-fi
+  printf '   %d drvs match, %d only-sandbox, %d only-native\n' \
+    "$n_both" "$n_only_sb" "$n_only_nt"
 
-# nix-instantiate each thunk → its drv path. We identify main/util by
-# grepping the thunk's outName; link is the one that imports the two.
-nt_main=""; nt_util=""; nt_link=""
-for t in "$thunks_dir"/*.nix; do
-  out_name=$(grep -oE 'outName +=[^;]*' "$t" | head -1 | tr -d '\"' | awk -F= '{print $2}' | tr -d ' ')
-  drv=$("$PATCHED_NIX/bin/nix" eval --no-eval-cache --impure --raw --file "$t" drvPath 2>/dev/null)
-  case "$out_name" in
-    main.o) nt_main="$drv" ;;
-    util.o) nt_util="$drv" ;;
-    hello)  nt_link="$drv" ;;
-  esac
-done
-
-printf '   native drvs:\n'
-printf '     main:  %s\n' "$nt_main"
-printf '     util:  %s\n' "$nt_util"
-printf '     link:  %s\n' "$nt_link"
-
-# ---------- 4. compare ----------
-fail=0
-compare() {
-  local label="$1" sandbox="$2" native="$3"
-  if [[ "$sandbox" != "$native" ]]; then
+  if (( n_only_sb > 0 || n_only_nt > 0 )); then
     printf '\033[1;31mMISMATCH\033[0m %s\n' "$label" >&2
-    printf '  sandbox: %s\n' "$sandbox" >&2
-    printf '  native:  %s\n' "$native"  >&2
-    fail=1
-  else
-    printf '\033[1;32mMATCH\033[0m    %s   %s\n' "$label" "$sandbox"
+    (( n_only_sb > 0 )) && printf '  only in sandbox:\n%s\n' "$only_sandbox" >&2
+    (( n_only_nt > 0 )) && printf '  only in native:\n%s\n' "$only_native" >&2
+    rm -rf "$workdir"
+    return 1
   fi
+  printf '\033[1;32mMATCH\033[0m    %s (%d drvs)\n' "$label" "$n_both"
+  rm -rf "$workdir"
 }
 
-echo
-compare "main.o" "$sb_main" "$nt_main"
-compare "util.o" "$sb_util" "$nt_util"
-compare "hello"  "$sb_link" "$nt_link"
+fail=0
 
+if [[ -z "${ONLY:-}" || "$ONLY" == "hello" ]]; then
+  run_fixture "hello" "example" "" "make" || fail=1
+fi
+
+if [[ -z "${ONLY:-}" || "$ONLY" == "lua" ]]; then
+  run_fixture "lua" "lua-src" "src" "make linux CC=cc" || fail=1
+fi
+
+# fmt: skipped for native equivalence — cmake configure requires
+# NIXGG_BYPASS=1, but that's a sandbox-mode env var (native mode's
+# shims don't honor it identically because native realise-mode via
+# filename heuristic already handles probes). Follow-up.
+
+echo
 if (( fail )); then
+  echo "some fixtures diverged."
   exit 1
 fi
-echo
-echo "all drvs byte-identical between native and sandbox."
+echo "all fixtures equivalent."
