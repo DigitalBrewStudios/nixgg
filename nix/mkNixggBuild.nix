@@ -60,87 +60,95 @@ let
     else "bin-";
   name = "${targetPrefix}${targetBase}.drv";
 
-  drv = derivation {
-  inherit name;
-  inherit system;
-  builder = "${bash}/bin/bash";
-
-  # Every store path the outer builder + our shims + user command
-  # touch must be reachable from the sandbox. Baking them into env
-  # vars gives Nix the string context it needs to mount them.
-  PATH = lib.concatStringsSep ":" (
+  # NIXGG_TOOLCHAIN_PATH: toolchain-only PATH, no shims. Rarely
+  # needed — the usual way to skip nixgg for a phase is
+  # NIXGG_BYPASS=1 (shims exec-passthrough to the real tool). Keep
+  # the plain PATH exposed too in case a user's build script wants
+  # to be extra explicit.
+  toolchainBins =
     [
-      "${nixgg}/bin"
-      "${nixgg}/shims"
       "${patchedNix}/bin"
       "${gcc}/bin"
       "${coreutils}/bin"
       "${bash}/bin"
       "${gnumake}/bin"
     ]
-    ++ builtins.map (p: "${p}/bin") extraToolchain
-  );
+    ++ builtins.map (p: "${p}/bin") extraToolchain;
 
-  # NIXGG_* the shims read.
-  NIXGG_ROOT          = "${nixgg}";
-  NIXGG_COMPILER_ROOT = "${gcc}";
-  NIXGG_BASH_ROOT     = "${bash}";
-  NIXGG_COREUTILS_ROOT = "${coreutils}";
-  NIXGG_GNUMAKE_ROOT  = "${gnumake}";
-  NIXGG_REAL_CC       = "${gcc}/bin/g++";
-  NIXGG_NIX           = "${patchedNix}/bin/nix";
-  NIXGG_NIX_HELPERS   = "${nixHelpers}";
-  # Sandbox daemon → use whatever $NIX_REMOTE points at (set by
-  # builder-rpc-v0).
-  NIXGG_STORE         = "auto";
-  # Turn on sandbox emission in the shims.
-  NIXGG_SANDBOX       = "1";
-  # The link shim matches this against its -o output to decide when
-  # to submit-output.
-  NIXGG_SANDBOX_TARGET = target;
-
-  # nix-command + ca + dyn-drv on the inner nix invocations
-  # (`nix derivation add`, `nix store add`, `nix store submit-output`).
-  NIX_CONFIG = ''
-    extra-experimental-features = nix-command ca-derivations dynamic-derivations
-  '';
-
-  requiredSystemFeatures = [ "builder-rpc-v0" ];
-
-  __contentAddressed = true;
-  outputHashMode = "text";
-  outputHashAlgo = "sha256";
-
-  # nix-ninja's mkMesonPackage trick: stdenv would complain about an
-  # unset $out; a "/nonexistent" placeholder keeps it happy while
-  # making any actual attempt to use $out fail visibly.
-  out = "/nonexistent";
-
-  args = [
-    "-c"
-    ''
-      set -euo pipefail
-      # $out is set to /nonexistent (see mkNixggBuild.nix comment
-      # above). If someone actually starts writing there, they'll
-      # get a clear "no such file" — that's the intent.
-
-      # Stage the source into a working dir. `src` is added to
-      # inputs.srcs by string-context — see PATH above; we cp it
-      # locally so the user's command can modify build artifacts
-      # (make writes .o files next to sources).
-      cp -r ${src} work
-      chmod -R u+w work
-      cd work
-
-      # Run the user command. Shims fire, submit drvs, symlink outputs.
-      # The link shim submits when it sees an -o matching
-      # NIXGG_SANDBOX_TARGET.
-      ${buildCommand}
-    ''
+  shimBins = [
+    "${nixgg}/bin"
+    "${nixgg}/shims"
   ];
 
-  # Bring src's store path into the sandbox as an input.
-  inherit src;
+  drv = derivation {
+    inherit name;
+    inherit system;
+    builder = "${bash}/bin/bash";
+
+    # Every store path the outer builder + our shims + user command
+    # touch must be reachable from the sandbox. Baking them into env
+    # vars gives Nix the string context it needs to mount them.
+    PATH = lib.concatStringsSep ":" (shimBins ++ toolchainBins);
+    NIXGG_TOOLCHAIN_PATH = lib.concatStringsSep ":" toolchainBins;
+
+    # NIXGG_* the shims read.
+    NIXGG_ROOT          = "${nixgg}";
+    NIXGG_COMPILER_ROOT = "${gcc}";
+    NIXGG_BASH_ROOT     = "${bash}";
+    NIXGG_COREUTILS_ROOT = "${coreutils}";
+    NIXGG_GNUMAKE_ROOT  = "${gnumake}";
+    NIXGG_REAL_CC       = "${gcc}/bin/g++";
+    NIXGG_NIX           = "${patchedNix}/bin/nix";
+    NIXGG_NIX_HELPERS   = "${nixHelpers}";
+    # Sandbox daemon → use whatever $NIX_REMOTE points at (set by
+    # builder-rpc-v0).
+    NIXGG_STORE         = "auto";
+    # Turn on sandbox emission in the shims.
+    NIXGG_SANDBOX       = "1";
+    # The link shim matches this against its -o output to decide when
+    # to submit-output.
+    NIXGG_SANDBOX_TARGET = target;
+
+    # nix-command + ca + dyn-drv on the inner nix invocations
+    # (`nix derivation add`, `nix store add`, `nix store submit-output`).
+    NIX_CONFIG = ''
+      extra-experimental-features = nix-command ca-derivations dynamic-derivations
+    '';
+
+    requiredSystemFeatures = [ "builder-rpc-v0" ];
+
+    __contentAddressed = true;
+    outputHashMode = "text";
+    outputHashAlgo = "sha256";
+
+    # nix-ninja's mkMesonPackage trick: stdenv would complain about an
+    # unset $out; a "/nonexistent" placeholder keeps it happy while
+    # making any actual attempt to use $out fail visibly.
+    out = "/nonexistent";
+
+    args = [
+      "-c"
+      ''
+        set -euo pipefail
+        # $out is set to /nonexistent (see comment above).
+
+        # Stage the source into a working dir. `src` is added to
+        # inputs.srcs by string-context; we cp it locally so the
+        # user's command can modify build artifacts (make writes .o
+        # files next to sources).
+        cp -r ${src} work
+        chmod -R u+w work
+        cd work
+
+        # Run the user command. Shims fire, submit drvs, symlink
+        # outputs. The link shim submits when it sees an -o matching
+        # NIXGG_SANDBOX_TARGET.
+        ${buildCommand}
+      ''
+    ];
+
+    # Bring src's store path into the sandbox as an input.
+    inherit src;
   };
 in
 {

@@ -28,18 +28,17 @@ mkNixggBuild {
   target = "libfmt.a";
   extraToolchain = [ cmake ninja pkg-config ];
   buildCommand = ''
-    # -DCMAKE_CXX_COMPILER_WORKS=1 short-circuits cmake's compiler
-    # probe. Under nixgg sandbox mode we don't yet have a working
-    # realise-mode path for probes: the inner nix that would build
-    # them can't reach the outer store's paths (see dyn-drv/NOTES.md
-    # on why nix-instantiate doesn't work inside builder-rpc-v0).
-    # Skipping the probe is safe here — the toolchain is pinned by
-    # nixgg's flake, and native mode still runs the probes fine.
-    cmake -S . -B build -G Ninja \
+    # Configure runs with NIXGG_BYPASS=1 so cmake's compiler probes
+    # (CheckCXXCompiler, CheckIncludeFile, etc.) get real binaries.
+    # Shims are still on PATH — they just exec-passthrough to the
+    # real tool. cmake happily hard-codes the shim path into its
+    # generated build files; once we unset NIXGG_BYPASS, subsequent
+    # cmake --build invocations go through nixgg normally.
+    NIXGG_BYPASS=1 cmake -S . -B build -G Ninja \
       -DCMAKE_BUILD_TYPE=Release \
-      -DCMAKE_CXX_COMPILER_WORKS=1 -DCMAKE_C_COMPILER_WORKS=1 \
       -DFMT_TEST=OFF -DFMT_DOC=OFF \
       -DBUILD_SHARED_LIBS=OFF
+
     cmake --build build --target fmt
   '';
 }

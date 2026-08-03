@@ -1,17 +1,20 @@
-# mosh — mobile shell. The hardest of the three examples.
+# mosh — mobile shell. Autoconf + protoc + libtool + pkg-config.
 #
-# STATUS: partially working. `./configure` gets far but fails on
-# `checking for suffix of object files` — autoconf runs a
-# conftest.c, expects it to compile to a real .o, but the sandbox
-# path can't realise the compile-shim's thunk into a real .o
-# synchronously (the inner nix needed for the realise-mode
-# carveout can't operate inside builder-rpc-v0's restricted RPC).
-# See nixgg/dyn-drv/NOTES.md for why. Native mode has the same
-# realise carveout and works fine.
+# STATUS: partially wired. Configure now uses NIXGG_BYPASS=1 to
+# skip shims (autoconf conftests need real .o files, which sandbox
+# mode can't produce). The compiler probes pass, header checks
+# pass, then configure fails at "Unable to find zlib" — the
+# -L/-I flags stdenv usually injects via NIX_LDFLAGS /
+# NIX_CFLAGS_COMPILE aren't set by mkNixggBuild.
 #
-# Kept as-is to document the shape a fixed dyn-drv mosh build
-# would take. `nix build .#mosh` currently fails; native `make`
-# inside a `nix develop` shell works.
+# Fixing this cleanly requires either:
+#   1. Threading buildInputs into mkNixggBuild and generating
+#      the right NIX_*FLAGS, or
+#   2. Running the whole configure step under stdenv's setup hooks
+#      (which then need to not fight with NIXGG_BYPASS).
+#
+# Deferred. The mosh definition is retained as a documentation
+# fixture — the shape a working autoconf-based dyn-drv build takes.
 #
 #
 #   - autoconf `./configure` phase: fires conftests
@@ -77,10 +80,13 @@ mkNixggBuild {
     zlib
   ];
   buildCommand = ''
-    # First-run: some mosh checkouts ship without a generated
-    # configure. autogen.sh regenerates from configure.ac.
-    [[ -x configure ]] || ./autogen.sh
-    ./configure --disable-hardening
+    # Configure with NIXGG_BYPASS=1 so autoconf's conftests exec
+    # real compiler + real .o files. autogen.sh + configure both
+    # end here; make picks up shim mode.
+    [[ -x configure ]] || NIXGG_BYPASS=1 ./autogen.sh
+    NIXGG_BYPASS=1 ./configure --disable-hardening
+
+    # Build phase — shims fire, every cc/c++/ar becomes a drv.
     make
   '';
 }

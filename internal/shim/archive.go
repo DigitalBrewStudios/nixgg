@@ -26,6 +26,9 @@ import (
 // thunk expression's ARFlags so `ar` inside the sandbox is called
 // with the caller's exact intent.
 func Archive(args []string, cfg *toolchain.Config, l paths.Layout) error {
+	if bypassed() {
+		return Passthrough(realARFor(cfg), args)
+	}
 	modifiers, archive, inputs, ok := parseARArgs(args)
 	if !ok {
 		return Passthrough(realARFor(cfg), args)

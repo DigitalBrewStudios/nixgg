@@ -28,6 +28,9 @@ import (
 // fall back to passthrough. We can't model the link without knowing
 // how to represent every input in the Nix expression.
 func Link(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layout) error {
+	if bypassed() {
+		return Passthrough(cfg.RealCC, args)
+	}
 	// Refuse compile-family invocations that only *look* like a link.
 	for _, a := range args {
 		switch a {

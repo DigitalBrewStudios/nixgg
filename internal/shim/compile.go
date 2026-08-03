@@ -36,6 +36,9 @@ import (
 // is what gets baked into the derivation's toolBasename, so
 // `cc -c foo.c` produces a "cc" invocation inside the sandbox, not g++.
 func Compile(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layout) error {
+	if bypassed() {
+		return Passthrough(cfg.RealCC, args)
+	}
 	source, output, flags, ok := parseCompileArgs(args)
 	if !ok {
 		// Not a single-TU compile; execv the real cc and hope.

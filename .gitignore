@@ -3,3 +3,4 @@ example/.nixgg/
 example/*.o
 example/hello
 .patched-nix
+result*
