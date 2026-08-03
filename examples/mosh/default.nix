@@ -1,4 +1,18 @@
-# mosh — mobile shell. The hardest of the three examples:
+# mosh — mobile shell. The hardest of the three examples.
+#
+# STATUS: partially working. `./configure` gets far but fails on
+# `checking for suffix of object files` — autoconf runs a
+# conftest.c, expects it to compile to a real .o, but the sandbox
+# path can't realise the compile-shim's thunk into a real .o
+# synchronously (the inner nix needed for the realise-mode
+# carveout can't operate inside builder-rpc-v0's restricted RPC).
+# See nixgg/dyn-drv/NOTES.md for why. Native mode has the same
+# realise carveout and works fine.
+#
+# Kept as-is to document the shape a fixed dyn-drv mosh build
+# would take. `nix build .#mosh` currently fails; native `make`
+# inside a `nix develop` shell works.
+#
 #
 #   - autoconf `./configure` phase: fires conftests
 #     ("conftest.c → conftest") which the compile shim recognises by
