@@ -28,6 +28,12 @@ var bases = []string{
 // present in the current environment. The object is embedded verbatim
 // into the thunk expression; sorted keys keep byte-content stable so
 // two runs with identical env produce identical thunk IDs.
+//
+// gcc-wrapper's activation trigger (NIX_CC_WRAPPER_TARGET_HOST_<triple>=1)
+// is propagated so the inner drv's wrapper knows to activate; the plain
+// NIX_CFLAGS_COMPILE / NIX_LDFLAGS forms are what the wrapper reads
+// once active. The triple-suffixed variants of those are redundant when
+// the base forms are present, so we don't emit them.
 func JSON() (string, error) {
 	triple := detectTriple()
 	kv := map[string]string{}
@@ -40,17 +46,15 @@ func JSON() (string, error) {
 			// The triple-suffixed variant wins if set — matches nix's
 			// gcc-wrapper precedence.
 			suffix := base + "_" + strings.ReplaceAll(triple, "-", "_")
-			if v := os.Getenv(suffix); v != "" {
+			if v := strings.TrimSpace(os.Getenv(suffix)); v != "" {
 				val = v
 			}
 		}
+		val = strings.TrimSpace(val)
 		if val == "" {
 			continue
 		}
 		kv[base] = val
-		if triple != "" {
-			kv[base+"_"+strings.ReplaceAll(triple, "-", "_")] = val
-		}
 	}
 	if len(kv) == 0 {
 		return "{}", nil

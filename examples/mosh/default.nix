@@ -6,14 +6,10 @@
 # doesn't provide. Once configure completes, `make` runs with
 # shims on and every cc/c++/ar becomes a nixgg drv.
 #
-# buildInputs (ncurses/openssl/zlib/protobuf) are translated by
-# mkNixggBuild into NIX_CFLAGS_COMPILE / NIX_LDFLAGS (-isystem
-# / -L / -rpath) so the pinned gcc-wrapper finds their headers
-# and libs. Same convention nixpkgs's stdenv uses.
-#
-# mosh has two link targets (mosh-client + mosh-server). We pick
-# mosh-server as the submitted output — the other still runs
-# through the link shim and gets its own drv, no submit-output.
+# Library deps go through `buildInputs` and stdenv handles the rest:
+# NIX_CFLAGS_COMPILE gets -isystem for each .dev output, NIX_LDFLAGS
+# gets -L / -rpath, and propagatedBuildInputs pulls in transitive
+# deps (that's how protobuf's absl requirement is satisfied).
 {
   mkNixggBuild,
   src,
@@ -29,13 +25,10 @@
   gnused,
   gawk,
   file,
-  # ncurses / openssl / zlib each split their outputs into .dev
-  # (headers) and default (libs). Autoconf's link probes need both;
-  # the flake pipes them as lists.
-  ncurses,       # [ ncurses.dev ncurses ]
-  openssl,       # [ openssl.dev openssl.out ]
-  zlib,          # [ zlib.dev zlib.out ]
-  protobuf-lib,  # protobuf (single output)
+  ncurses,
+  openssl,
+  zlib,
+  abseil-cpp,
 }:
 
 mkNixggBuild {
@@ -43,7 +36,7 @@ mkNixggBuild {
   version = "unstable";
   inherit src;
   target = "mosh-server";
-  extraToolchain = [
+  nativeBuildInputs = [
     autoconf
     automake
     libtool
@@ -57,10 +50,25 @@ mkNixggBuild {
     gawk
     file
   ];
-  buildInputs = ncurses ++ openssl ++ zlib ++ [ protobuf-lib ];
+  buildInputs = [ ncurses openssl zlib protobuf abseil-cpp ];
   buildCommand = ''
     [[ -x configure ]] || NIXGG_BYPASS=1 ./autogen.sh
-    NIXGG_BYPASS=1 ./configure --disable-hardening
-    make
+    # --disable-dependency-tracking: autoconf-generated Makefiles
+    # try to update .deps/*.Tpo sidecar files during compile via
+    # gcc's -M flag. Our shim drops -M* (dep files target paths
+    # outside the sandbox), and the missing .Tpo trips a
+    # `mv: cannot stat` in the Makefile. Turning off tracking
+    # sidesteps the whole mechanism; we don't need it — Nix's own
+    # CA hashing handles rebuild correctness.
+    NIXGG_BYPASS=1 ./configure --disable-hardening --disable-dependency-tracking
+
+    # Mosh's Makefile: src/frontend/ depends on src/crypto/libmoshcrypto.a
+    # etc. Building the crypto subdir first ensures the .a is present
+    # before the frontend link tries to consume it. `make -C src`
+    # walks all subdirs in order; the top-level `make` also does this
+    # but with parallel jobs the frontend can race the crypto build.
+    # A single-threaded make sidesteps that; nixgg is where parallelism
+    # actually happens (drv graph).
+    make -j1
   '';
 }

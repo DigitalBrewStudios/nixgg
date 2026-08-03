@@ -183,7 +183,7 @@
           # drv submitted from inside the sandbox. Consumers get the
           # compiled artifact via `builtins.outputOf drv.outPath "out"`.
           mkNixggBuild = import ./nix/mkNixggBuild.nix {
-            inherit (pkgs) lib coreutils gnumake bash;
+            inherit (pkgs) lib stdenv coreutils gnumake bash;
             gcc         = toolchain.gcc;
             nixgg       = nixggBin;
             nixHelpers  = nixHelpers;
@@ -228,13 +228,8 @@
             inherit mkNixggBuild;
             inherit (pkgs)
               autoconf automake libtool pkg-config perl protobuf which
-              gnum4 gnugrep gnused gawk file;
-            # Pass both .dev (headers) and .out (libs) outputs for
-            # the multi-output packages autoconf's link probes need.
-            ncurses = [ pkgs.ncurses.dev pkgs.ncurses ];
-            openssl = [ pkgs.openssl.dev pkgs.openssl.out ];
-            zlib    = [ pkgs.zlib.dev pkgs.zlib.out ];
-            protobuf-lib = pkgs.protobuf;
+              gnum4 gnugrep gnused gawk file
+              ncurses openssl zlib abseil-cpp;
             src = mosh-src;
           }).result;
         in
@@ -301,9 +296,6 @@
               # own gcc-wrapper anyway; anything a caller actually
               # needs to set should go into a project-local shellHook.
               unset NIX_CFLAGS_COMPILE NIX_CFLAGS_LINK NIX_LDFLAGS
-              unset NIX_CFLAGS_COMPILE_x86_64_unknown_linux_gnu \
-                    NIX_CFLAGS_LINK_x86_64_unknown_linux_gnu \
-                    NIX_LDFLAGS_x86_64_unknown_linux_gnu
 
               # Prepend shims/ so `cc`, `c++`, `ar` etc. dispatch to
               # the nixgg shim binary. bin/ first so `nixgg` itself

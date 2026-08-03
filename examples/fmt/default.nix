@@ -9,8 +9,10 @@
 #     filename heuristic auto-realises those synchronously, so
 #     configure sees actual .o files, not thunks.
 #
-# extraToolchain adds cmake + ninja + pkg-config to the sandbox's
-# PATH. mkNixggBuild wraps their /bin dirs in.
+# nativeBuildInputs adds cmake + ninja + pkg-config to the sandbox's
+# PATH. stdenv wraps their /bin dirs in and runs their setup hooks
+# (cmake's setup hook doesn't auto-configure since we set
+# dontConfigure=true in mkNixggBuild).
 {
   mkNixggBuild,
   src,
@@ -26,7 +28,7 @@ mkNixggBuild {
   # libfmt.a is the "big" output; a header-only variant exists too
   # but we want the archive path exercised.
   target = "libfmt.a";
-  extraToolchain = [ cmake ninja pkg-config ];
+  nativeBuildInputs = [ cmake ninja pkg-config ];
   buildCommand = ''
     # Configure runs with NIXGG_BYPASS=1 so cmake's compiler probes
     # (CheckCXXCompiler, CheckIncludeFile, etc.) get real binaries.
