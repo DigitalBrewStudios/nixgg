@@ -26,13 +26,17 @@ func Enabled() bool {
 }
 
 // DerivationAdd pipes a JSON drv description to `nix derivation add`
-// and returns the resulting drv store path.
+// and returns the resulting drv store path. --offline: nix should
+// have zero business contacting substituters for a `derivation add`
+// (it's registering a drv description, not resolving inputs), but
+// under some sandbox configurations it tries anyway and stalls on
+// name-resolution failures. Cheap paranoia.
 func DerivationAdd(cfg *toolchain.Config, drv expr.JSONDrv) (string, error) {
 	body, err := json.Marshal(drv)
 	if err != nil {
 		return "", fmt.Errorf("encode drv json: %w", err)
 	}
-	cmd := exec.Command(cfg.Nix, "derivation", "add")
+	cmd := exec.Command(cfg.Nix, "--offline", "derivation", "add")
 	cmd.Env = os.Environ()
 	cmd.Stdin = bytes.NewReader(body)
 	var stderr bytes.Buffer
@@ -54,7 +58,7 @@ func DerivationAdd(cfg *toolchain.Config, drv expr.JSONDrv) (string, error) {
 // objects and record them — required inside a sandbox where
 // unregistered references cause build-time errors.
 func StoreAddScan(cfg *toolchain.Config, name, path string) (string, error) {
-	cmd := exec.Command(cfg.Nix, "store", "add", "--scan", "-n", name, path)
+	cmd := exec.Command(cfg.Nix, "--offline", "store", "add", "--scan", "-n", name, path)
 	cmd.Env = os.Environ()
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -84,7 +88,7 @@ func StoreAddScan(cfg *toolchain.Config, name, path string) (string, error) {
 // capture bytes at submission time. See nix-ninja
 // crates/nix-builder-rpc-client for the daemon-RPC approach.
 func SubmitOutput(cfg *toolchain.Config, drvPath, outputName string) error {
-	cmd := exec.Command(cfg.Nix, "store", "submit-output", drvPath, outputName)
+	cmd := exec.Command(cfg.Nix, "--offline", "store", "submit-output", drvPath, outputName)
 	cmd.Env = os.Environ()
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 	if err := cmd.Run(); err != nil {

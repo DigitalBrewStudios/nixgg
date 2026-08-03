@@ -13,7 +13,9 @@
 package expr
 
 import (
+	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 )
 
@@ -178,6 +180,108 @@ func (d *Derivation) linkerInputs() string {
 	}
 	return strings.Join(parts, " ")
 }
+
+// ToNix serialises this Derivation as an `import <helper>.nix { … }`
+// expression suitable for writing to .nixgg/thunks/<id>.nix. The
+// helper (builder.nix / linker.nix / archiver.nix, all in nix/) is
+// still what actually calls `derivation`; this emitter just fills
+// in its arguments from our shared struct — so if we add a field
+// to Derivation, both this native path and toJSON pick it up.
+//
+// helpers must be the /nix/store/…-nixgg-nix root.
+//
+// The bytes this produces are byte-equivalent to what the pre-
+// Derivation-struct emitters produced (Compile/Link/Archive in
+// expr.go). Verified externally by tests/drv-equivalence.sh.
+func (d *Derivation) ToNix(helpers string) string {
+	var b strings.Builder
+	switch d.Kind {
+	case KindCompile:
+		fmt.Fprintf(&b, "import %s/builder.nix {\n", helpers)
+		fmt.Fprintf(&b, "  toolBasename   = %q;\n", d.Tool)
+		fmt.Fprintf(&b, "  srcTree        = %s;\n", d.SrcStore) // Nix path literal, unquoted
+		fmt.Fprintf(&b, "  source         = %q;\n", d.Source)
+		fmt.Fprintf(&b, "  outName        = %q;\n", d.OutName)
+		fmt.Fprintf(&b, "  flagsJSON      = ''%s'';\n", jsonArrayIndented(d.Flags))
+		fmt.Fprintf(&b, "  storeDepsJSON  = ''%s'';\n", jsonArrayIndented(d.StoreDeps))
+		fmt.Fprintf(&b, "  wrapperEnvJSON = ''%s'';\n", jsonObjectSorted(d.WrapperEnv))
+	case KindLink:
+		fmt.Fprintf(&b, "import %s/linker.nix {\n", helpers)
+		fmt.Fprintf(&b, "  toolBasename   = %q;\n", d.Tool)
+		fmt.Fprintf(&b, "  outName        = %q;\n", d.OutName)
+		fmt.Fprintf(&b, "  inputs         = %s;\n", derivInputsList(d.Inputs))
+		fmt.Fprintf(&b, "  flagsJSON      = ''%s'';\n", jsonArrayIndented(d.Flags))
+		fmt.Fprintf(&b, "  storeDepsJSON  = ''%s'';\n", jsonArrayIndented(d.StoreDeps))
+		fmt.Fprintf(&b, "  wrapperEnvJSON = ''%s'';\n", jsonObjectSorted(d.WrapperEnv))
+	case KindArchive:
+		fmt.Fprintf(&b, "import %s/archiver.nix {\n", helpers)
+		fmt.Fprintf(&b, "  outName        = %q;\n", d.OutName)
+		fmt.Fprintf(&b, "  inputs         = %s;\n", derivInputsList(d.Inputs))
+		fmt.Fprintf(&b, "  arFlags        = %q;\n", d.ARFlags)
+		fmt.Fprintf(&b, "  storeDepsJSON  = ''%s'';\n", jsonArrayIndented(d.StoreDeps))
+		fmt.Fprintf(&b, "  wrapperEnvJSON = ''%s'';\n", jsonObjectSorted(d.WrapperEnv))
+	}
+	b.WriteString("}\n")
+	return b.String()
+}
+
+// derivInputsList renders `inputs = [ ... ]` for linker/archiver
+// helpers. Same shape as the old InputsList in expr.go, adapted to
+// our internal derivInput type.
+func derivInputsList(inputs []derivInput) string {
+	if len(inputs) == 0 {
+		return "[ ]"
+	}
+	var b strings.Builder
+	b.WriteString("[ ")
+	for _, in := range inputs {
+		var drv string
+		switch in.InputKind {
+		case "store":
+			ref := in.Ref
+			if strings.HasPrefix(ref, "/nix/store/") {
+				drv = fmt.Sprintf("builtins.storePath %q", ref)
+			} else {
+				drv = fmt.Sprintf("builtins.storePath \"/nix/store/%s\"", ref)
+			}
+		case "nix":
+			drv = "import " + in.Ref
+		}
+		fmt.Fprintf(&b, "{ drv = %s; name = %q; } ", drv, in.Name)
+	}
+	b.WriteString("]")
+	return b.String()
+}
+
+// jsonObjectSorted renders a map as a sorted-key JSON object,
+// byte-deterministic. Used for wrapperEnvJSON.
+func jsonObjectSorted(m map[string]string) string {
+	if len(m) == 0 {
+		return "{}"
+	}
+	keys := make([]string, 0, len(m))
+	for k := range m {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	var b strings.Builder
+	b.WriteByte('{')
+	for i, k := range keys {
+		if i > 0 {
+			b.WriteByte(',')
+		}
+		kj, _ := jsonMarshal(k)
+		vj, _ := jsonMarshal(m[k])
+		b.Write(kj)
+		b.WriteByte(':')
+		b.Write(vj)
+	}
+	b.WriteByte('}')
+	return b.String()
+}
+
+// jsonMarshal is a thin wrapper for readability.
+func jsonMarshal(v any) ([]byte, error) { return json.Marshal(v) }
 
 // toJSON serialises this Derivation for `nix derivation add`. The
 // caller passes extraSrcs (basenames of already-realised store paths

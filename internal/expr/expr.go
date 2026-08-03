@@ -17,19 +17,56 @@ import (
 	"strings"
 )
 
-// Compile builds a per-TU compile expression.
+// Compile builds a per-TU compile expression. Routes through the
+// shared Derivation struct: same struct also drives CompileJSON in
+// sandbox mode, so any field added here shows up in both wire
+// formats. See internal/expr/derivation.go on the equivalence
+// property.
 func Compile(p CompileParams) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "import %s/builder.nix {\n", p.Helpers)
-	fmt.Fprintf(&b, "  toolBasename   = %q;\n", p.Tool)
-	fmt.Fprintf(&b, "  srcTree        = %s;\n", p.SrcTree) // Nix path literal, unquoted
-	fmt.Fprintf(&b, "  source         = %q;\n", p.Source)
-	fmt.Fprintf(&b, "  outName        = %q;\n", p.OutName)
-	fmt.Fprintf(&b, "  flagsJSON      = ''%s'';\n", jsonArrayIndented(p.Flags))
-	fmt.Fprintf(&b, "  storeDepsJSON  = ''%s'';\n", p.StoreDepsJSON)
-	fmt.Fprintf(&b, "  wrapperEnvJSON = ''%s'';\n", p.WrapperEnvJSON)
-	b.WriteString("}\n")
-	return b.String()
+	d := compileDerivation(p)
+	return d.ToNix(p.Helpers)
+}
+
+// compileDerivation is the shared "params → Derivation" builder for
+// the compile Kind. Used by Compile (→ ToNix) and CompileJSON
+// (→ ToJSON).
+func compileDerivation(p CompileParams) *Derivation {
+	return &Derivation{
+		Kind:       KindCompile,
+		Tool:       p.Tool,
+		SrcStore:   p.SrcTree,
+		Source:     p.Source,
+		OutName:    p.OutName,
+		Flags:      p.Flags,
+		StoreDeps:  decodeStringArray(p.StoreDepsJSON),
+		WrapperEnv: decodeStringObject(p.WrapperEnvJSON),
+	}
+}
+
+// decodeStringArray parses `["a","b",…]` back into []string.
+// storeDepsJSON is stored pre-encoded on the params struct
+// (historical); we re-parse to feed the shared struct.
+func decodeStringArray(s string) []string {
+	if s == "" || s == "[]" {
+		return nil
+	}
+	var out []string
+	if err := json.Unmarshal([]byte(s), &out); err != nil {
+		return nil
+	}
+	return out
+}
+
+// decodeStringObject parses `{"K": "V", …}` back into map[string]string.
+func decodeStringObject(s string) map[string]string {
+	if s == "" || s == "{}" {
+		return nil
+	}
+	var out map[string]string
+	if err := json.Unmarshal([]byte(s), &out); err != nil {
+		return nil
+	}
+	return out
 }
 
 // CompileParams is the input for one compile expression.
@@ -44,18 +81,22 @@ type CompileParams struct {
 	WrapperEnvJSON string   // pre-encoded JSON object
 }
 
-// Link builds a link expression.
+// Link builds a link expression. Same Derivation-based flow as
+// Compile — see compileDerivation.
 func Link(p LinkParams) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "import %s/linker.nix {\n", p.Helpers)
-	fmt.Fprintf(&b, "  toolBasename   = %q;\n", p.Tool)
-	fmt.Fprintf(&b, "  outName        = %q;\n", p.OutName)
-	fmt.Fprintf(&b, "  inputs         = %s;\n", InputsList(p.Inputs))
-	fmt.Fprintf(&b, "  flagsJSON      = ''%s'';\n", jsonArrayIndented(p.Flags))
-	fmt.Fprintf(&b, "  storeDepsJSON  = ''%s'';\n", p.StoreDepsJSON)
-	fmt.Fprintf(&b, "  wrapperEnvJSON = ''%s'';\n", p.WrapperEnvJSON)
-	b.WriteString("}\n")
-	return b.String()
+	return linkDerivation(p).ToNix(p.Helpers)
+}
+
+func linkDerivation(p LinkParams) *Derivation {
+	return &Derivation{
+		Kind:       KindLink,
+		Tool:       p.Tool,
+		OutName:    p.OutName,
+		Inputs:     inputsToDeriv(p.Inputs),
+		Flags:      p.Flags,
+		StoreDeps:  decodeStringArray(p.StoreDepsJSON),
+		WrapperEnv: decodeStringObject(p.WrapperEnvJSON),
+	}
 }
 
 // LinkParams is the input for one link expression.
@@ -69,17 +110,34 @@ type LinkParams struct {
 	WrapperEnvJSON string
 }
 
-// Archive builds an `ar` expression.
+// Archive builds an `ar` expression. Same Derivation-based flow.
 func Archive(p ArchiveParams) string {
-	var b strings.Builder
-	fmt.Fprintf(&b, "import %s/archiver.nix {\n", p.Helpers)
-	fmt.Fprintf(&b, "  outName        = %q;\n", p.OutName)
-	fmt.Fprintf(&b, "  inputs         = %s;\n", InputsList(p.Inputs))
-	fmt.Fprintf(&b, "  arFlags        = %q;\n", p.ARFlags)
-	fmt.Fprintf(&b, "  storeDepsJSON  = ''%s'';\n", p.StoreDepsJSON)
-	fmt.Fprintf(&b, "  wrapperEnvJSON = ''%s'';\n", p.WrapperEnvJSON)
-	b.WriteString("}\n")
-	return b.String()
+	return archiveDerivation(p).ToNix(p.Helpers)
+}
+
+func archiveDerivation(p ArchiveParams) *Derivation {
+	return &Derivation{
+		Kind:       KindArchive,
+		OutName:    p.OutName,
+		Inputs:     inputsToDeriv(p.Inputs),
+		ARFlags:    p.ARFlags,
+		StoreDeps:  decodeStringArray(p.StoreDepsJSON),
+		WrapperEnv: decodeStringObject(p.WrapperEnvJSON),
+	}
+}
+
+// inputsToDeriv translates the shim-facing Input type (Kind="store"/"nix")
+// to the internal derivInput used by Derivation.
+func inputsToDeriv(xs []Input) []derivInput {
+	out := make([]derivInput, len(xs))
+	for i, in := range xs {
+		out[i] = derivInput{
+			InputKind: in.Kind,
+			Ref:       in.Ref,
+			Name:      in.Name,
+		}
+	}
+	return out
 }
 
 // ArchiveParams is the input for one archive expression.
