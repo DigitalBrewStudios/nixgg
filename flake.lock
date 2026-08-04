@@ -91,43 +91,21 @@
         "type": "github"
       }
     },
-    "llvm-cmake-src": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1718472092,
-        "narHash": "sha256-xbJ5sIFhJP160GGHfnLSuXSsx+V+UaRVjnpB16qHag0=",
-        "type": "tarball",
-        "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/cmake-18.1.8.src.tar.xz"
-      },
-      "original": {
-        "type": "tarball",
-        "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/cmake-18.1.8.src.tar.xz"
-      }
-    },
     "llvm-src": {
       "flake": false,
       "locked": {
-        "lastModified": 1718472092,
-        "narHash": "sha256-aMhcnT/HUJeHO7LEFzJWTwrKm/O9ystGlqe3niT14Vg=",
-        "type": "tarball",
-        "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/llvm-18.1.8.src.tar.xz"
+        "lastModified": 1736847662,
+        "narHash": "sha256-cZAB5vZjeTsXt9QHbP5xluWNQnAHByHtHnAhVDV0E6I=",
+        "owner": "llvm",
+        "repo": "llvm-project",
+        "rev": "cd708029e0b2869e80abe31ddb175f7c35361f90",
+        "type": "github"
       },
       "original": {
-        "type": "tarball",
-        "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/llvm-18.1.8.src.tar.xz"
-      }
-    },
-    "llvm-third-party-src": {
-      "flake": false,
-      "locked": {
-        "lastModified": 1718472092,
-        "narHash": "sha256-sbfcDI1cD2IftL6bKYV6qjhFSNOF3F2M0QqdAs10u8k=",
-        "type": "tarball",
-        "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/third-party-18.1.8.src.tar.xz"
-      },
-      "original": {
-        "type": "tarball",
-        "url": "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/third-party-18.1.8.src.tar.xz"
+        "owner": "llvm",
+        "ref": "llvmorg-19.1.7",
+        "repo": "llvm-project",
+        "type": "github"
       }
     },
     "lua-src": {
@@ -264,9 +242,7 @@
       "inputs": {
         "ffmpeg-src": "ffmpeg-src",
         "fmt-src": "fmt-src",
-        "llvm-cmake-src": "llvm-cmake-src",
         "llvm-src": "llvm-src",
-        "llvm-third-party-src": "llvm-third-party-src",
         "lua-src": "lua-src",
         "mosh-src": "mosh-src",
         "nix-15793": "nix-15793",

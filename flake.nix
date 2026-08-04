@@ -54,29 +54,31 @@
     flake = false;
   };
   inputs.llvm-src = {
-    # LLVM monorepo. We only build llvm/ (no clang/lld/etc.), targeting
-    # X86 to keep the TU count and wall-clock reasonable while still
-    # exercising a real C++ codebase through shims + drv graph.
-    url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/llvm-18.1.8.src.tar.xz";
-    flake = false;
-  };
-  inputs.llvm-cmake-src = {
-    # LLVM 18's llvm/CMakeLists.txt does `include(cmake/base-config-ix.cmake)`
-    # from a sibling `cmake/` dir at the monorepo root. The
-    # standalone llvm-<v>.src.tar.xz doesn't include it — nixpkgs
-    # pulls it from a separate release artifact.
-    url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/cmake-18.1.8.src.tar.xz";
-    flake = false;
-  };
-  inputs.llvm-third-party-src = {
-    # Same story: llvm/ needs sibling third-party/ (contains benchmarks).
-    url = "https://github.com/llvm/llvm-project/releases/download/llvmorg-18.1.8/third-party-18.1.8.src.tar.xz";
+    # LLVM monorepo checkout. We only build llvm/ (no clang/lld/etc.),
+    # targeting X86 to keep the TU count and wall-clock reasonable while
+    # still exercising a real C++ codebase through shims + drv graph.
+    #
+    # Why a git checkout of the monorepo rather than the per-component
+    # release tarballs: llvm/CMakeLists.txt `include()`s from sibling
+    # `cmake/` and `third-party/` directories, which the standalone
+    # llvm-<v>.src.tar.xz doesn't carry. The monorepo has all three side
+    # by side, so no reassembly step is needed.
+    #
+    # Why 19.x rather than 18.1.8: LLVM 18 predates GCC 15, which stopped
+    # pulling in <cstdint> transitively via other libstdc++ headers.
+    # 18.1.8's SmallVector.h uses uint64_t/uint32_t without including
+    # <cstdint>, so every TU that reaches it fails with "'uint64_t' was
+    # not declared in this scope" under our pinned gcc-15.3.0. Upstream
+    # fixed this in llvm/llvm-project#101761, which shipped in 19 —
+    # nixpkgs backports that same commit for release_version < 19. Pinning
+    # 19.x gets the fix as released, no patch needed.
+    url = "github:llvm/llvm-project/llvmorg-19.1.7";
     flake = false;
   };
 
   outputs =
     { self, nixpkgs, nix-15793, lua-src, fmt-src, mosh-src, redis-src, ffmpeg-src,
-      llvm-src, llvm-cmake-src, llvm-third-party-src }:
+      llvm-src }:
     let
       forEachSystem = f: builtins.mapAttrs (system: pkgs: f system pkgs) nixpkgs.legacyPackages;
     in
@@ -294,22 +296,14 @@
           two-phase = twoPhaseBuild.result;
           two-phase-codegen = twoPhaseBuild.codegen;
 
-          # Reassemble LLVM monorepo layout: llvm/, cmake/, third-party/
-          # each ship as a separate release tarball. LLVM's cmake wants
-          # them side by side (llvm/CMakeLists.txt does `include(...)`
-          # from ../cmake/). Same technique nixpkgs uses.
-          llvmMerged = pkgs.runCommand "llvm-18.1.8-monorepo" { } ''
-            mkdir -p $out
-            cp -r ${llvm-src} $out/llvm
-            cp -r ${llvm-cmake-src} $out/cmake
-            cp -r ${llvm-third-party-src} $out/third-party
-            chmod -R u+w $out
-          '';
+          # llvm-src is a monorepo checkout, which already has llvm/,
+          # cmake/, and third-party/ side by side — exactly the layout
+          # llvm/CMakeLists.txt's `include()`s expect. No reassembly.
           llvmBuild = import ./examples/llvm {
             inherit mkNixggBuild;
             inherit (pkgs) runCommand cmake ninja pkg-config python3 perl which
               libffi libxml2 ncurses zlib;
-            src = llvmMerged;
+            src = llvm-src;
           };
           llvm = llvmBuild.result;
         in
@@ -325,6 +319,10 @@
           # their own targets in downstream flakes.
           inherit mkNixggBuild;
           inherit hello lua fmt mosh redis ffmpeg llvm;
+          # LLVM intermediates (phase 1a/1b tools) exposed for
+          # smoke-testing the chain.
+          llvm-min-tblgen = llvmBuild.llvm-min-tblgen;
+          llvm-tblgen = llvmBuild.llvm-tblgen;
           inherit two-phase two-phase-codegen;
           # Per-example dev shells (plain mkShell mirroring the outer
           # stdenv env) — `nix develop .#<name>-shell` gives native

@@ -175,6 +175,18 @@ func parseLinkArgs(args []string) (output string, inputs, flags []string, ok boo
 			// skip
 		case a == "-MF" || a == "-MT" || a == "-MQ":
 			i++ // skip value
+		// Drop `-Wl,--dependency-file=<path>`. CMake 4 emits this on link
+		// lines so ninja can track link-time deps; it makes ld *write* a
+		// makefile fragment to a build-tree-relative path. That path
+		// doesn't exist in the link drv's sandbox (we only stage inputs,
+		// not the caller's build tree), so ld fails with "cannot open
+		// dependency file …/link.d". Same rationale as the -M* family
+		// above: dep tracking is the caller's build system's concern, and
+		// Nix's CA hashing already handles rebuild correctness.
+		case strings.HasPrefix(a, "-Wl,--dependency-file="):
+			// skip
+		case a == "-Wl,--dependency-file":
+			i++ // skip value (separated form)
 		default:
 			flags = append(flags, a)
 		}
