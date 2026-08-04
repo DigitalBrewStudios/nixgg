@@ -18,14 +18,24 @@
 #            so cmake doesn't try to rebuild llvm-min-tblgen from
 #            scratch.
 #
-#   phase3 — the actual LLVM build (`llvm-config` as final target;
-#            any core llvm library gets built along the way). Both
-#            tblgens are pre-realised store paths in `toolbin`, a
-#            symlink-dir passed via `-DLLVM_NATIVE_TOOL_DIR=${toolbin}`.
-#            cmake's LLVM_NATIVE_TOOL_DIR hook finds each binary
-#            there and skips its build target; every downstream
-#            `.inc` generation step now execs a real ELF, not a
-#            drvref stub.
+#   phase3 — the actual LLVM build. Target is `llc`, the static
+#            compiler: its dependency graph pulls in libLLVMCore,
+#            CodeGen, Analysis, MC, AsmPrinter, and the X86 backend —
+#            i.e. most of what people mean by "LLVM". Both tblgens are
+#            pre-realised store paths in `toolbin`, a symlink-dir passed
+#            via `-DLLVM_NATIVE_TOOL_DIR=${toolbin}`. cmake's
+#            LLVM_NATIVE_TOOL_DIR hook finds each binary there and skips
+#            its build target; every downstream `.inc` generation step
+#            now execs a real ELF, not a drvref stub.
+#
+#            Target choice matters more than it looks: ninja builds only
+#            what the named target needs, so an earlier version of this
+#            file targeted `llvm-config` and quietly built just ~480 TUs
+#            across 5 libraries (llvm-config is a config-printing
+#            utility whose whole graph is Support + TargetParser +
+#            Demangle — it never touches the compiler). `llc` is a real
+#            consumer of the library graph. Don't "simplify" this back
+#            to a smaller tool.
 #
 # Scope: llvm only (no clang/lld/lldb/mlir/polly/etc.), X86 target
 # only. Still ~2000 TUs; enough to exercise every code path the
@@ -37,10 +47,9 @@
 # stricter transitive-include behavior; see flake.nix's llvm-src comment.
 #
 # Verified end to end: all three phases build and every artifact is a
-# real, runnable ELF — llvm-min-tblgen and llvm-tblgen both report
-# "LLVM version 19.1.7", and llvm-config reports 19.1.7 / X86. The
-# phase chain is what makes that possible: phase2's cmake execs phase1's
-# binary mid-build, which a drvref stub could never satisfy.
+# real, runnable ELF. The phase chain is what makes that possible:
+# phase2's cmake execs phase1's binary mid-build, which a drvref stub
+# could never satisfy.
 {
   mkNixggBuild,
   runCommand,
@@ -129,13 +138,13 @@ let
     pname = "llvm";
     version = "19.1.7";
     inherit src;
-    target = "bin/llvm-config";
+    target = "bin/llc";
     nativeBuildInputs = commonNativeBuildInputs;
     buildInputs = commonBuildInputs ++ [ toolbin ];
     buildCommand = ''
       NIXGG_BYPASS=1 cmake -S llvm -B build -G Ninja ${commonCmakeFlags} \
         -DLLVM_NATIVE_TOOL_DIR=${toolbin}
-      ninja -C build -j"$NIX_BUILD_CORES" llvm-config
+      ninja -C build -j"$NIX_BUILD_CORES" llc
     '';
   };
 in
