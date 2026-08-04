@@ -133,12 +133,40 @@ cd "$src"
 "%s" %s -c "$source" -o "$out/$outName"
 `, pathPrefix, d.Tool, shellQuoteFlags(d.Flags))
 	case KindLink:
-		return fmt.Sprintf(
-			`set -euo pipefail
+		// Split flags into non-`-l` and `-l<name>` — the classic
+		// single-pass ld resolves libraries against object files
+		// mentioned BEFORE them. Emit inputs (objects/archives)
+		// between the two groups so `-lm`/`-lc` come last, after
+		// every object/archive that might reference libm/libc.
+		// When there are no `-l` flags, fall through to the plain
+		// flags-then-inputs layout so drv content stays byte-
+		// identical to the pre-`-l`-split era (no trailing empty
+		// slot). This keeps the equivalence set for hello/lua/mosh
+		// stable — those never had `-l` flags to begin with.
+		var lflags, nonLflags []string
+		for _, f := range d.Flags {
+			if strings.HasPrefix(f, "-l") && len(f) > 2 {
+				lflags = append(lflags, f)
+			} else {
+				nonLflags = append(nonLflags, f)
+			}
+		}
+		// Layout matches nix/linker.nix's shell script exactly so JSON
+		// and native modes produce byte-identical scripts.
+		if len(lflags) == 0 {
+			return fmt.Sprintf(
+				`set -euo pipefail
 %s
 mkdir -p "$out"
 "%s" %s %s -o "$out/%s"
 `, pathPrefix, d.Tool, shellQuoteFlags(d.Flags), d.linkerInputs(), d.OutName)
+		}
+		return fmt.Sprintf(
+			`set -euo pipefail
+%s
+mkdir -p "$out"
+"%s" %s %s %s -o "$out/%s"
+`, pathPrefix, d.Tool, shellQuoteFlags(nonLflags), d.linkerInputs(), shellQuoteFlags(lflags), d.OutName)
 	case KindArchive:
 		// Native's archiver.nix uses bare `ar` (from PATH) with `D`
 		// prepended to arFlags (see nix/archiver.nix). Mirror that

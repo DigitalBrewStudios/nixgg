@@ -12,20 +12,27 @@
 # configure completes, `make -j"$NIX_BUILD_CORES"` recurses and
 # every cc invocation becomes a nixgg drv.
 #
-# CURRENT STATUS: shim throughput scales — ~1200 compile drvs
-# submit cleanly (~46s wall on 32 cores, 3-4x parallel speedup vs
-# `-j1`). A subset of TUs (parseutils.o and a few relatives) fail
-# to compile inside the inner drv with "gmtime_r implicit
-# declaration" — the drv env is missing something the outer
-# configure baked into config.h (`HAVE_GMTIME_R=1` there vs.
-# missing `<time.h>` feature-test-macro plumbing in the drv's
-# NIX_CFLAGS_COMPILE). Follow-up work; unrelated to the shim
-# submission or the -L/-l resolution.
+# Verified: 106 MB `ffmpeg_g` ELF builds in ~45s cold. Two shim
+# fixes were needed to get here:
 #
-# The link shim's -L/-l resolution is generic — it picks up
-# `-L libavcodec -lavcodec` combos and treats
-# `libavcodec/libavcodec.a` as a real input if it's a nixgg
-# drvref stub. Verified on the smaller ffmpeg binaries.
+#   1. The scanner used to add `srcDir` to userDirs (which drove both
+#      projectRoot widening AND -I flag emission). For ffmpeg's
+#      `cc -c libavutil/parseutils.c -I. -Ilibavutil`, that produced
+#      a spurious `-Ilibavutil` in the drv, pointing at $src/libavutil
+#      after `cd $src`. libavutil/time.h then shadowed glibc's
+#      <time.h> (because -I dirs win over -isystem), and `struct tm`
+#      went missing. Fix: separate projectRootHints (srcDir + cwd +
+#      caller dirs) from callerDirs (only what the caller explicitly
+#      passed). See internal/scan/scan.go.
+#
+#   2. The link shim emitted flags before inputs (`cc <flags> <objs>`).
+#      ffmpeg's link line has `-lm -latomic` in flags but `libavutil.a`
+#      etc. as inputs; ld resolves libraries against objects seen
+#      *before* them, so `-lm` at the front left every math symbol
+#      unresolved. Fix: split `-l<name>` out of flags and emit them
+#      AFTER inputs. Applied symmetrically to nix/linker.nix so
+#      native and sandbox drvs remain byte-identical (all four
+#      existing fixtures still equivalent).
 {
   mkNixggBuild,
   src,

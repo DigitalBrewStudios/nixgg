@@ -22,9 +22,24 @@ let
   coreutils   = pureStorePath coreutilsRoot;
   compiler    = pureStorePath compilerRoot;
   flags       = builtins.fromJSON flagsJSON;
-  quotedFlags = builtins.concatStringsSep " " (map (f: "'${f}'") flags);
   storeDeps   = map pureStorePath (builtins.fromJSON storeDepsJSON);
   wrapperEnv  = builtins.fromJSON wrapperEnvJSON;
+
+  # Split `-l<name>` out of flags so they can be emitted AFTER
+  # objects/archives on the link line. Classic single-pass ld
+  # resolves libraries against objects mentioned *before* them; if
+  # `-lm` appears before ffmpeg's libavutil.a we get "undefined
+  # reference to sqrt". Preserve intra-group order so `-Wl,--as-needed`
+  # and its ilk still apply.
+  isLFlag = f: builtins.substring 0 2 f == "-l" && builtins.stringLength f > 2;
+  lflags     = builtins.filter isLFlag flags;
+  nonLflags  = builtins.filter (f: !(isLFlag f)) flags;
+  quotedNonL = builtins.concatStringsSep " " (map (f: "'${f}'") nonLflags);
+  quotedL    = builtins.concatStringsSep " " (map (f: "'${f}'") lflags);
+  # When there are no -l flags, keep the historical layout (no
+  # trailing empty slot in the shell command) so pre-existing drv
+  # hashes stay stable.
+  tailArgs = if lflags == [] then "" else " " + quotedL;
 
   objArgs = builtins.concatStringsSep " " (map
     (i: "'${i.drv}/${i.name}'")
@@ -45,7 +60,7 @@ derivation ({
       set -euo pipefail
       export PATH="${coreutils}/bin:${compiler}/bin"
       mkdir -p "$out"
-      "${toolBasename}" ${quotedFlags} ${objArgs} -o "$out/${outName}"
+      "${toolBasename}" ${quotedNonL} ${objArgs}${tailArgs} -o "$out/${outName}"
     ''
   ];
 

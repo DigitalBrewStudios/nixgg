@@ -169,7 +169,17 @@ func runScanner(cc, source string, flags []string) (*Result, []depEntry, error) 
 	if err != nil {
 		return nil, nil, err
 	}
-	userDirs := []string{cwd, filepath.Dir(srcAbs)}
+	// callerDirs = the caller's -I/-isystem/etc dirs. Emitted as
+	// -I<rel> flags for the drv.
+	// projectRootHints = every dir that projectRoot must cover, so
+	// srcAbs's dir + cwd are included even if the caller didn't ask
+	// for them via -I. Keeping the two lists separate is important:
+	// srcDir is a projectRoot hint but must NOT become a spurious -I,
+	// or ffmpeg's `-I. -Ilibavutil` (cwd=ffmpeg-root, srcDir=libavutil)
+	// gets a bogus `-Ilibavutil` that shadows glibc's <time.h> with
+	// ffmpeg's own libavutil/time.h.
+	callerDirs := []string{}
+	projectRootHints := []string{cwd, filepath.Dir(srcAbs)}
 	storeDirs := []string{}
 	for _, d := range includeDirs {
 		abs := d
@@ -179,10 +189,11 @@ func runScanner(cc, source string, flags []string) (*Result, []depEntry, error) 
 		if strings.HasPrefix(abs, "/nix/store/") {
 			storeDirs = append(storeDirs, abs)
 		} else {
-			userDirs = append(userDirs, abs)
+			callerDirs = append(callerDirs, abs)
+			projectRootHints = append(projectRootHints, abs)
 		}
 	}
-	projectRoot := commonAncestor(userDirs)
+	projectRoot := commonAncestor(projectRootHints)
 
 	// Strip -M* dep-generation flags from the scanner's argv — we
 	// supply our own -MM -MG -MF -.
@@ -210,7 +221,7 @@ func runScanner(cc, source string, flags []string) (*Result, []depEntry, error) 
 		if tok == filepath.Base(source) || tok == source {
 			continue
 		}
-		abs, ok := resolveDep(tok, userDirs)
+		abs, ok := resolveDep(tok, projectRootHints)
 		if !ok {
 			continue // -MG bare name we couldn't find; ignore
 		}
@@ -249,17 +260,31 @@ func runScanner(cc, source string, flags []string) (*Result, []depEntry, error) 
 	// Sort headers by staging rel path so thunk content is stable.
 	sort.Slice(headers, func(i, j int) bool { return headers[i].Rel < headers[j].Rel })
 
-	// -I flags rewritten relative to the project root.
+	// -I flags rewritten relative to the project root. Only the
+	// caller's own -I dirs are emitted; srcDir/cwd are only used to
+	// widen projectRoot (see projectRootHints above). Dedup so a
+	// caller's `-I.` (== cwd) and a repeat entry don't produce two
+	// -Iflags.
 	iflags := []string{"-I."}
-	for _, p := range userDirs {
+	seenRel := map[string]bool{".": true}
+	for _, p := range callerDirs {
+		var rel string
 		if p == projectRoot {
+			rel = "."
+		} else {
+			r, err := filepath.Rel(projectRoot, p)
+			if err != nil {
+				continue
+			}
+			rel = r
+		}
+		if seenRel[rel] {
 			continue
 		}
-		rel, err := filepath.Rel(projectRoot, p)
-		if err != nil {
-			continue
+		seenRel[rel] = true
+		if rel != "." {
+			iflags = append(iflags, "-I"+rel)
 		}
-		iflags = append(iflags, "-I"+rel)
 	}
 	// Store dirs pass through unchanged.
 	var storeFlags []string
