@@ -29,12 +29,21 @@ make          # compiles + auto-force-links via NIXGG_AUTOFORCE=1
 
 # 3. Sandbox: same source, whole graph as dynamic Nix derivations.
 nix build .#hello
-result-bin/hello
+./result/hello
+
+# 4. Real projects, sandbox mode, out-of-tree sources pinned in flake.lock.
+nix build .#lua         # lua 5.4.7 — 32 TUs, 1 archive, 1 link
+nix build .#fmt         # {fmt} 11.0.2 — cmake + ninja + libfmt.a
+nix build .#mosh        # mosh unstable — autoconf + protobuf + openssl/ncurses/zlib
 ```
 
-Both produce byte-identical `.drv` files. `nix build .#hello` gets an
-instant cache hit from an earlier native build in `example/`, and
-vice versa.
+Both modes produce byte-identical `.drv` files. `nix build .#lua`
+gets an instant cache hit from an earlier native build in an
+extracted lua source tree, and vice versa. The equivalence is pinned
+by [tests/drv-equivalence.sh](tests/drv-equivalence.sh), which
+currently covers all four fixtures: `hello` (3 drvs), `lua` (37),
+`fmt` (3), `mosh` (38) — every drv matches byte-for-byte between the
+two modes.
 
 ## Architecture
 
@@ -51,9 +60,11 @@ drv-store-paths match byte-for-byte.
 ## Requirements
 
 - Nix ≥ 2.36 for sandbox mode (needs `builder-rpc-v0` + `nix store
-  submit-output`, both on NixOS/nix master). Native mode works with
-  older Nix.
+  submit-output`, both merged into NixOS/nix master via
+  [#15793][pr-15793]). Native mode works with older Nix.
 - The flake pins its own Nix build; `nix develop` bootstraps it.
+
+[pr-15793]: https://github.com/NixOS/nix/pull/15793
 
 ## Prior art
 
