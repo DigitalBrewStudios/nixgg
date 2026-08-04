@@ -77,6 +77,12 @@ let
     dontInstall = true;
     dontFixup = true;
 
+    # Populates $NIX_BUILD_CORES (used by build scripts via
+    # `make -j"$NIX_BUILD_CORES"`). Actual per-drv build parallelism
+    # still happens in Nix's outer pass — this only speeds up the
+    # shim submission phase.
+    enableParallelBuilding = true;
+
     # nix-command + ca + dyn-drv for the inner nix invocations our
     # shims make (nix derivation add / nix store add / submit-output).
     NIX_CONFIG = ''

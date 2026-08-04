@@ -62,13 +62,12 @@ mkNixggBuild {
     # CA hashing handles rebuild correctness.
     NIXGG_BYPASS=1 ./configure --disable-hardening --disable-dependency-tracking
 
-    # Mosh's Makefile: src/frontend/ depends on src/crypto/libmoshcrypto.a
-    # etc. Building the crypto subdir first ensures the .a is present
-    # before the frontend link tries to consume it. `make -C src`
-    # walks all subdirs in order; the top-level `make` also does this
-    # but with parallel jobs the frontend can race the crypto build.
-    # A single-threaded make sidesteps that; nixgg is where parallelism
-    # actually happens (drv graph).
-    make -j1
+    # Recursive SUBDIRS walk. Automake serialises the outer subdir
+    # order (crypto → terminal → frontend), so the frontend's
+    # `../crypto/libmoshcrypto.a` stub is guaranteed present by the
+    # time make enters the frontend subdir even under -jN. Within
+    # each subdir the shims fire in parallel — each drv submission
+    # is an independent fork+exec into `nix derivation add`.
+    make -j"$NIX_BUILD_CORES"
   '';
 }
