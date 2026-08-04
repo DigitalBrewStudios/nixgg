@@ -29,6 +29,20 @@ import (
 	"github.com/tbereknyei/nixgg/internal/wrapperenv"
 )
 
+// realToolFor picks the sibling binary matching the caller's argv[0]
+// role from the same bin/ dir NIXGG_REAL_CC points at. Nix's
+// gcc-wrapper has `cc → gcc` (C mode) and `c++ → g++` (C++ mode) —
+// invoking g++ on a `.c` source triggers cc-wrapper's isCxx=1 self-
+// check (see wrapper's `bin/gcc = *++` test) and breaks C-only build
+// systems. `cc` → `gcc`, `c++` → `g++`, unknown → the pinned RealCC.
+func realToolFor(cfg *toolchain.Config, tool dispatch.Tool) string {
+	base := tool.Basename()
+	if base == "" {
+		return cfg.RealCC
+	}
+	return filepath.Join(filepath.Dir(cfg.RealCC), base)
+}
+
 // Compile is the shim entrypoint for `cc -c ...`. It parses argv,
 // stages source + headers, writes a thunk, and symlinks the output.
 //
@@ -36,13 +50,20 @@ import (
 // is what gets baked into the derivation's toolBasename, so
 // `cc -c foo.c` produces a "cc" invocation inside the sandbox, not g++.
 func Compile(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layout) error {
+	// Passthrough targets the sibling binary matching argv[0]:
+	// cc→cc/gcc (C mode), c++→c++/g++ (C++ mode). Using
+	// NIXGG_REAL_CC blindly would send `.c` compiles through g++,
+	// which cc-wrapper's line-30 self-check maps to C++ mode and
+	// breaks C-only build systems (redis's deps/hiredis: alloc.c
+	// under g++ fails `-std=c99` + designated-initializer parsing).
+	realTool := realToolFor(cfg, tool)
 	if bypassed() {
-		return Passthrough(cfg.RealCC, args)
+		return Passthrough(realTool, args)
 	}
 	source, output, flags, ok := parseCompileArgs(args)
 	if !ok {
 		// Not a single-TU compile; execv the real cc and hope.
-		return Passthrough(cfg.RealCC, args)
+		return Passthrough(realTool, args)
 	}
 
 	// Fill in a default output name if -o was omitted.
@@ -57,12 +78,8 @@ func Compile(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.L
 	logf("compile %s -> %s", source, output)
 
 	// Resolve the real cc for scan-headers to match the caller's tool
-	// role. Nix's gcc-wrapper sits at $compilerBin/{cc,gcc,c++,g++}
-	// and picks up different defaults per name. Our shim's TOOL was
-	// mapped from argv[0]; the sibling binary of the same name is what
-	// scan-headers should use.
-	compilerBin := filepath.Dir(cfg.RealCC)
-	scannerCC := filepath.Join(compilerBin, tool.Basename())
+	// role — same reason as the passthrough case above.
+	scannerCC := realTool
 
 	// 1. Discover headers.
 	scanResult, err := scan.Run(l, scannerCC, source, flags)

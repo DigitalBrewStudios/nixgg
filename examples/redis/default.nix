@@ -1,0 +1,50 @@
+# redis — plain-Makefile server. Cross-referenced against
+# nixpkgs/pkgs/by-name/re/redis/package.nix; same nativeBuildInputs,
+# same use-system-lua strategy. No autoconf, no cmake, but the
+# top-level Makefile recurses into deps/{hiredis,linenoise,lua,
+# hdr_histogram,fpconv,fast_float,jemalloc} — each is its own make
+# that produces a .a. The shim's archive path handles them the same
+# way it handles mosh's src/*/lib*.a.
+#
+# Two redis-specific quirks worth noting:
+#
+#   1. SOURCE_DATE_EPOCH. src/mkreleasehdr.sh bakes
+#      `<hostname>-<epoch>` into release.o. Without a pinned epoch,
+#      every build produces a different CA hash for redis-server —
+#      cache misses forever. Any fixed integer works; the historical
+#      value in the native-mode script is 1700000000.
+#
+#   2. `make PREFIX=$out` mirrors nixpkgs' flag — routes install
+#      paths to $out even though our submit-output path doesn't
+#      really need it (the outer drv's out is /nonexistent). Kept
+#      for consistency and in case a follow-up phase installs.
+{
+  mkNixggBuild,
+  src,
+  which,
+  pkg-config,
+  python3,
+  lua,           # system lua, matches nixpkgs's approach
+  gnugrep,
+  gnused,
+  gawk,
+}:
+
+mkNixggBuild {
+  pname = "redis";
+  version = "8.2.2";
+  inherit src;
+  target = "redis-server";
+  # Same set nixpkgs uses, plus grep/sed/awk that redis's release
+  # scripts shell out to.
+  nativeBuildInputs = [ pkg-config which python3 gnugrep gnused gawk ];
+  buildInputs = [ lua ];
+  buildCommand = ''
+    export SOURCE_DATE_EPOCH=1700000000
+
+    # Nixpkgs style: just `make` — no persist-settings dance, no
+    # per-deps explicit invocation. Redis's top-level Makefile
+    # recurses through deps/ before src/ on its own.
+    make -j"$NIX_BUILD_CORES" MALLOC=libc redis-server
+  '';
+}

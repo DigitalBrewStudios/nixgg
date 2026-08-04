@@ -191,13 +191,31 @@
         "type": "github"
       }
     },
+    "redis-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1759439623,
+        "narHash": "sha256-0TMUSNCrDEtOkojcmFFhmLQ0ghyLAn+OS4xl4Sbr76c=",
+        "owner": "redis",
+        "repo": "redis",
+        "rev": "d85b5f4c2cc597da78989bc48d6b38b895c186f6",
+        "type": "github"
+      },
+      "original": {
+        "owner": "redis",
+        "ref": "8.2.2",
+        "repo": "redis",
+        "type": "github"
+      }
+    },
     "root": {
       "inputs": {
         "fmt-src": "fmt-src",
         "lua-src": "lua-src",
         "mosh-src": "mosh-src",
         "nix-15793": "nix-15793",
-        "nixpkgs": "nixpkgs_2"
+        "nixpkgs": "nixpkgs_2",
+        "redis-src": "redis-src"
       }
     }
   },

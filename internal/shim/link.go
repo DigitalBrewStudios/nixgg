@@ -28,20 +28,21 @@ import (
 // fall back to passthrough. We can't model the link without knowing
 // how to represent every input in the Nix expression.
 func Link(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layout) error {
+	realTool := realToolFor(cfg, tool)
 	if bypassed() {
-		return Passthrough(cfg.RealCC, args)
+		return Passthrough(realTool, args)
 	}
 	// Refuse compile-family invocations that only *look* like a link.
 	for _, a := range args {
 		switch a {
 		case "-c", "-E", "-S", "-M", "-MM":
-			return Passthrough(cfg.RealCC, args)
+			return Passthrough(realTool, args)
 		}
 	}
 
 	output, inputs, flags, ok := parseLinkArgs(args)
 	if !ok {
-		return Passthrough(cfg.RealCC, args)
+		return Passthrough(realTool, args)
 	}
 
 	logf("link %s <- %s", output, joinBase(inputs))
@@ -72,7 +73,7 @@ func Link(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layo
 			})
 		default:
 			logf("link passthrough: %s isn't a nixgg symlink (%s)", in, c.Kind)
-			return Passthrough(cfg.RealCC, args)
+			return Passthrough(realTool, args)
 		}
 	}
 

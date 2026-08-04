@@ -45,9 +45,13 @@
     url = "github:mobile-shell/mosh";
     flake = false;
   };
+  inputs.redis-src = {
+    url = "github:redis/redis/8.2.2";
+    flake = false;
+  };
 
   outputs =
-    { self, nixpkgs, nix-15793, lua-src, fmt-src, mosh-src }:
+    { self, nixpkgs, nix-15793, lua-src, fmt-src, mosh-src, redis-src }:
     let
       forEachSystem = f: builtins.mapAttrs (system: pkgs: f system pkgs) nixpkgs.legacyPackages;
     in
@@ -241,6 +245,13 @@
             src = mosh-src;
           };
           mosh = moshBuild.result;
+
+          redisBuild = import ./examples/redis {
+            inherit mkNixggBuild;
+            inherit (pkgs) which pkg-config python3 lua gnugrep gnused gawk;
+            src = redis-src;
+          };
+          redis = redisBuild.result;
         in
         toolchain
         // {
@@ -253,7 +264,7 @@
           # mkNixggBuild is a function; expose so consumers can build
           # their own targets in downstream flakes.
           inherit mkNixggBuild;
-          inherit hello lua fmt mosh;
+          inherit hello lua fmt mosh redis;
           # Per-example dev shells (plain mkShell mirroring the outer
           # stdenv env) — `nix develop .#<name>-shell` gives native
           # mode the same buildInputs/setup-hooks the sandbox has.
@@ -262,6 +273,7 @@
           lua-shell = luaBuild.shell;
           fmt-shell = fmtBuild.shell;
           mosh-shell = moshBuild.shell;
+          redis-shell = redisBuild.shell;
           default = envShell;
         }
       );
