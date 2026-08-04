@@ -183,7 +183,7 @@
           # drv submitted from inside the sandbox. Consumers get the
           # compiled artifact via `builtins.outputOf drv.outPath "out"`.
           mkNixggBuild = import ./nix/mkNixggBuild.nix {
-            inherit (pkgs) lib stdenv coreutils gnumake bash;
+            inherit (pkgs) lib stdenv mkShell coreutils gnumake bash;
             gcc         = toolchain.gcc;
             nixgg       = nixggBin;
             nixHelpers  = nixHelpers;
@@ -202,10 +202,16 @@
           # inside `nix develop /path/to/nixgg`; the resulting drvs
           # (compile drvs for main.o + util.o, link drv for hello)
           # are byte-identical between the two modes.
-          hello = (import ./dyn-drv/hello-mkbuild.nix {
+          # Each example is exposed as three attrs:
+          #   .#<name>      → resolved artifact (builtins.outputOf …)
+          #   .#<name>-drv  → the outer stdenv drv (`nix develop` target
+          #                    for tests/drv-equivalence.sh: same
+          #                    buildInputs / setup-hooks as sandbox)
+          helloBuild = import ./dyn-drv/hello-mkbuild.nix {
             inherit mkNixggBuild;
             inherit (pkgs) lib;
-          }).result;
+          };
+          hello = helloBuild.result;
 
           # Three out-of-tree examples driven from flake inputs. Each
           # is a `mkNixggBuild` call site with its source pinned in
@@ -213,25 +219,28 @@
           # native equivalence — same drv hashes when the shims run
           # under a plain `nix develop -c make` in an extracted src
           # tree — is pinned by tests/drv-equivalence.sh.
-          lua = (import ./examples/lua {
+          luaBuild = import ./examples/lua {
             inherit mkNixggBuild;
             src = lua-src;
-          }).result;
+          };
+          lua = luaBuild.result;
 
-          fmt = (import ./examples/fmt {
+          fmtBuild = import ./examples/fmt {
             inherit mkNixggBuild;
             inherit (pkgs) cmake ninja pkg-config;
             src = fmt-src;
-          }).result;
+          };
+          fmt = fmtBuild.result;
 
-          mosh = (import ./examples/mosh {
+          moshBuild = import ./examples/mosh {
             inherit mkNixggBuild;
             inherit (pkgs)
               autoconf automake libtool pkg-config perl protobuf which
               gnum4 gnugrep gnused gawk file
               ncurses openssl zlib abseil-cpp;
             src = mosh-src;
-          }).result;
+          };
+          mosh = moshBuild.result;
         in
         toolchain
         // {
@@ -245,6 +254,14 @@
           # their own targets in downstream flakes.
           inherit mkNixggBuild;
           inherit hello lua fmt mosh;
+          # Per-example dev shells (plain mkShell mirroring the outer
+          # stdenv env) — `nix develop .#<name>-shell` gives native
+          # mode the same buildInputs/setup-hooks the sandbox has.
+          # Consumed by tests/drv-equivalence.sh.
+          hello-shell = helloBuild.shell;
+          lua-shell = luaBuild.shell;
+          fmt-shell = fmtBuild.shell;
+          mosh-shell = moshBuild.shell;
           default = envShell;
         }
       );

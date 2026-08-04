@@ -20,6 +20,7 @@
 {
   lib,
   stdenv,
+  mkShell,
   bash,
   coreutils,
   gnumake,
@@ -141,8 +142,15 @@ let
       # the trigger to inject buildInputs -isystem / -L. wrapperenv
       # gates propagation to the inner drv on non-empty flags, so
       # empty-buildInputs builds still hash identically to native.
+      # Strip per-run noise: -frandom-seed (per-invocation) and
+      # `-rpath <workdir>/outputs/out/lib` (bintools-wrapper always
+      # injects one off the derivation's $out, which is /nonexistent
+      # in the sandbox and <workdir>/outputs/out under nix develop).
+      # Both would leak into every inner drv's env and break
+      # CA-hash stability; neither is real linker information for a
+      # build whose actual output is a submitted drv.
       NIX_CFLAGS_COMPILE=$(printf '%s' "''${NIX_CFLAGS_COMPILE:-}" | sed -e 's| *-frandom-seed=[^ ]*||g')
-      NIX_LDFLAGS=$(printf '%s' "''${NIX_LDFLAGS:-}" | sed -e 's| *-rpath /nonexistent/lib||g')
+      NIX_LDFLAGS=$(printf '%s' "''${NIX_LDFLAGS:-}" | sed -e 's| *-rpath [^ ]*/outputs/out/lib||g' -e 's| *-rpath /nonexistent/lib||g')
       export NIX_CFLAGS_COMPILE NIX_LDFLAGS
     '';
 
@@ -152,9 +160,59 @@ let
       runHook postBuild
     '';
   };
+
+  # Devshell that mirrors `drv`'s stdenv env (same buildInputs +
+  # setup-hooks + NIX_CFLAGS_COMPILE/NIX_LDFLAGS/PKG_CONFIG_PATH),
+  # but as a plain mkShell so `nix develop` can enter it (a
+  # text-hashed dyn-drv can't be an env-target). Used by
+  # tests/drv-equivalence.sh to run the same buildCommand natively
+  # under the same tool env and verify inner drvs hash-match.
+  #
+  # We replay preBuild's scrubbing in shellHook so what the caller
+  # inherits matches what the sandbox's shims capture. Anything after
+  # here (make, cmake, autogen.sh) is up to the caller.
+  # Plain mkShell (not NoCC): mirrors the outer drv's stdenv env
+  # including cc-wrapper's activation trigger. Bypass-mode configure
+  # steps (autoconf, cmake probes) exec-passthrough to the outer
+  # cc-wrapper, which needs the trigger to inject buildInputs
+  # -isystem / -L. The setup-hook's -rpath <outputs>/out/lib and
+  # -frandom-seed noise gets scrubbed below.
+  shell = mkShell {
+    name = "${drvName}-shell";
+    inherit nativeBuildInputs buildInputs propagatedBuildInputs;
+    # The exact command string the sandbox runs, passed through so
+    # tests/drv-equivalence.sh can replay it natively without
+    # duplicating build recipes. Consumers pull it out with
+    # `nix eval --raw .#<attr>-shell.passthru.buildCommand`.
+    passthru.buildCommand = buildCommand;
+    shellHook = ''
+      export PATH="${nixgg}/bin:${nixgg}/shims:${patchedNix}/bin:$PATH"
+      unset NIX_HARDENING_ENABLE
+      unset CC CXX LD AR RANLIB NM STRIP OBJCOPY OBJDUMP READELF SIZE
+      # Strip per-run noise: -frandom-seed (per-invocation) and
+      # `-rpath <workdir>/outputs/out/lib` (bintools-wrapper always
+      # injects one off the derivation's $out, which is /nonexistent
+      # in the sandbox and <workdir>/outputs/out under nix develop).
+      # Both would leak into every inner drv's env and break
+      # CA-hash stability; neither is real linker information for a
+      # build whose actual output is a submitted drv.
+      NIX_CFLAGS_COMPILE=$(printf '%s' "''${NIX_CFLAGS_COMPILE:-}" | sed -e 's| *-frandom-seed=[^ ]*||g')
+      NIX_LDFLAGS=$(printf '%s' "''${NIX_LDFLAGS:-}" | sed -e 's| *-rpath [^ ]*/outputs/out/lib||g' -e 's| *-rpath /nonexistent/lib||g')
+      export NIX_CFLAGS_COMPILE NIX_LDFLAGS
+
+      export NIXGG_ROOT="${nixgg}"
+      export NIXGG_COMPILER_ROOT="${gcc}"
+      export NIXGG_BASH_ROOT="${bash}"
+      export NIXGG_COREUTILS_ROOT="${coreutils}"
+      export NIXGG_GNUMAKE_ROOT="${gnumake}"
+      export NIXGG_REAL_CC="${gcc}/bin/g++"
+      export NIXGG_NIX="${patchedNix}/bin/nix"
+      export NIXGG_NIX_HELPERS="${nixHelpers}"
+    '';
+  };
 in
 {
-  inherit drv;
+  inherit drv shell;
   # Consumer entrypoint: `nix build … .result` walks the dyn-drv
   # chain and returns the final compiled artifact.
   result = builtins.outputOf drv.outPath "out";

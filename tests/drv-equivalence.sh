@@ -69,7 +69,14 @@ fi
 # - build-cmd:   what to run in the src dir under `nix develop`
 # ---------------------------------------------------------------
 run_fixture() {
-  local attr="$1" src_input="$2" subdir="$3" build_cmd="$4"
+  # attr:      flake attr (also used to derive .#$attr-shell)
+  # src_input: flake-input name for the source ("example" for hello)
+  # subdir:    cd into this dir inside the unpacked src (empty = root)
+  #
+  # The build command comes from the flake itself:
+  # `.#$attr-shell.passthru.buildCommand` — same string mkNixggBuild
+  # passes to buildPhase. No per-fixture logic lives in this script.
+  local attr="$1" src_input="$2" subdir="$3"
   local label="$attr"
 
   echo
@@ -157,13 +164,26 @@ run_fixture() {
   # Wipe any pre-existing .nixgg/ that auto-seed might hit.
   rm -rf "$workdir/.nixgg" 2>/dev/null || true
 
-  printf '==> native: nix develop -c <build> in %s\n' "$workdir/${subdir}"
+  # Pull the exact buildCommand the sandbox runs, straight from the
+  # flake — no duplication of build recipes in this test.
+  local build_cmd
+  build_cmd="$("$PATCHED_NIX/bin/nix" eval --raw \
+    "$nixgg_root#$attr-shell.passthru.buildCommand" 2>/dev/null)" || {
+      echo "could not read buildCommand for $attr" >&2
+      return 1
+    }
+
+  printf '==> native: nix develop .#%s-shell in %s\n' "$attr" "$workdir/${subdir}"
   local nt_log="/tmp/nixgg-equiv-$attr-native.log"
+  # `.#<attr>-shell` is a plain mkShell whose shellHook is a byte-copy
+  # of mkNixggBuild.nix:preBuild — same buildInputs, same env scrub,
+  # same NIXGG_* exports.
   (
     cd "$workdir/${subdir}"
-    nix develop "$nixgg_root" --command bash -c "
+    "$PATCHED_NIX/bin/nix" develop "$nixgg_root#$attr-shell" --command bash -c "
       export NIXGG_STORE='local?root=$ALT_STORE'
       export NIXGG_AUTOFORCE=0
+      set -euo pipefail
       $build_cmd
     "
   ) > "$nt_log" 2>&1 || {
@@ -172,28 +192,23 @@ run_fixture() {
     return 1
   }
 
-  # Find the thunks and nix-instantiate each. workdir may or may not
-  # be a git root — the auto-seed walks up to nearest `.git` and
-  # lands `.nixgg/` there.
-  local thunks_dir=""
-  for cand in \
-      "$workdir/.nixgg/thunks" \
-      "$workdir/${subdir}/.nixgg/thunks"; do
-    if compgen -G "$cand/*.nix" > /dev/null; then
-      thunks_dir="$cand"
-      break
-    fi
-  done
-  if [[ -z "$thunks_dir" ]]; then
+  # nixgg's auto-seed walks up to nearest `.git` and lands `.nixgg/`
+  # there. Under our tempdir (no .git), it lands wherever the shim
+  # ran — for a recursive-make build like mosh's that's one
+  # `.nixgg/thunks/` per subdir the shim was invoked in. Collect
+  # thunks from ALL of them.
+  local thunk_files
+  thunk_files=$(find "$workdir" -type f -path '*/.nixgg/thunks/*.nix' 2>/dev/null)
+  if [[ -z "$thunk_files" ]]; then
     echo "native build produced no thunks; see $nt_log" >&2
     return 1
   fi
 
   local nt_drvs
-  nt_drvs=$(for t in "$thunks_dir"/*.nix; do
+  nt_drvs=$(while IFS= read -r t; do
     "$PATCHED_NIX/bin/nix" eval --no-eval-cache --impure --raw \
       --file "$t" drvPath 2>/dev/null | xargs -n1 basename
-  done | sort -u)
+  done <<<"$thunk_files" | sort -u)
 
   # -- 3. compare sets --
   local only_sandbox only_native both
@@ -227,18 +242,19 @@ run_fixture() {
 
 fail=0
 
+# Fixtures:  attr | src-input | src-subdir
 if [[ -z "${ONLY:-}" || "$ONLY" == "hello" ]]; then
-  run_fixture "hello" "example" "" "make" || fail=1
+  run_fixture "hello" "example" "" || fail=1
 fi
-
 if [[ -z "${ONLY:-}" || "$ONLY" == "lua" ]]; then
-  run_fixture "lua" "lua-src" "src" "make linux CC=cc" || fail=1
+  run_fixture "lua" "lua-src" "" || fail=1
 fi
-
-# fmt: skipped for native equivalence — cmake configure requires
-# NIXGG_BYPASS=1, but that's a sandbox-mode env var (native mode's
-# shims don't honor it identically because native realise-mode via
-# filename heuristic already handles probes). Follow-up.
+if [[ -z "${ONLY:-}" || "$ONLY" == "fmt" ]]; then
+  run_fixture "fmt" "fmt-src" "" || fail=1
+fi
+if [[ -z "${ONLY:-}" || "$ONLY" == "mosh" ]]; then
+  run_fixture "mosh" "mosh-src" "" || fail=1
+fi
 
 echo
 if (( fail )); then
