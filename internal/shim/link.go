@@ -132,7 +132,16 @@ func Link(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layo
 // everything else as a flag. Order matters for the flags — link line
 // order affects symbol resolution — but not for the inputs (the
 // linker.nix helper preserves order).
+//
+// `-L<dir> -l<name>` pairs get resolved against local files: if
+// `<dir>/lib<name>.a` exists as a nixgg drvref stub (or thunk
+// symlink), it's promoted to an explicit input and the `-l<name>`
+// is dropped. ffmpeg's Makefile writes its link line that way
+// (`-Llibavcodec -lavcodec` instead of `libavcodec/libavcodec.a`)
+// and the drv otherwise fails at ld with "cannot find -lavcodec"
+// because the produced `.a` isn't on the sandbox's link path.
 func parseLinkArgs(args []string) (output string, inputs, flags []string, ok bool) {
+	var libDirs []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
@@ -146,6 +155,21 @@ func parseLinkArgs(args []string) (output string, inputs, flags []string, ok boo
 			output = a[2:]
 		case isLinkInput(a):
 			inputs = append(inputs, a)
+		case strings.HasPrefix(a, "-L") && len(a) > 2:
+			libDirs = append(libDirs, a[2:])
+			flags = append(flags, a)
+		case a == "-L":
+			if i+1 < len(args) {
+				libDirs = append(libDirs, args[i+1])
+				flags = append(flags, a, args[i+1])
+				i++
+			}
+		case strings.HasPrefix(a, "-l") && len(a) > 2:
+			if hit := resolveLibFlag(a[2:], libDirs); hit != "" {
+				inputs = append(inputs, hit)
+			} else {
+				flags = append(flags, a)
+			}
 		// Drop dep-file flags — link-time -M is meaningless in our thunk.
 		case a == "-M" || a == "-MM" || a == "-MG" || a == "-MP" || a == "-MD" || a == "-MMD":
 			// skip
@@ -159,6 +183,47 @@ func parseLinkArgs(args []string) (output string, inputs, flags []string, ok boo
 		return "", nil, nil, false
 	}
 	return output, inputs, flags, true
+}
+
+// resolveLibFlag checks whether any -L directory contains a
+// `lib<name>.a` we own (drvref stub in sandbox mode, or a thunk
+// symlink in native). Returns the matching path so the caller can
+// treat it as a link input and drop the -l flag; empty string
+// means "not ours, leave -l<name> alone for the linker to try".
+func resolveLibFlag(name string, libDirs []string) string {
+	for _, d := range libDirs {
+		cand := filepath.Join(d, "lib"+name+".a")
+		fi, err := os.Lstat(cand)
+		if err != nil {
+			continue
+		}
+		if fi.Mode()&os.ModeSymlink != 0 {
+			// Native mode: symlink to a .nix thunk or a .drv path.
+			return cand
+		}
+		// Sandbox mode: drvref stub is a small regular file with
+		// our magic header. Peek at the first byte cheaply.
+		if fi.Mode().IsRegular() && fi.Size() < 4096 {
+			if hasNixggDrvRef(cand) {
+				return cand
+			}
+		}
+	}
+	return ""
+}
+
+// hasNixggDrvRef reports whether `path` starts with the drvref
+// magic header (sandbox.DrvRefHeader). Cheap peek so a stale
+// vendored .a doesn't get promoted.
+func hasNixggDrvRef(path string) bool {
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	buf := make([]byte, len("#!nixgg-drvref\n"))
+	n, _ := f.Read(buf)
+	return n == len(buf) && string(buf) == "#!nixgg-drvref\n"
 }
 
 func isLinkInput(a string) bool {

@@ -1,5 +1,18 @@
 {
   "nodes": {
+    "ffmpeg-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1757877609,
+        "narHash": "sha256-e67oRv0L0zTNtRXaL7YUsuYGTPL8EH4ATXBsZzP5pTA=",
+        "type": "tarball",
+        "url": "https://ffmpeg.org/releases/ffmpeg-7.1.2.tar.xz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://ffmpeg.org/releases/ffmpeg-7.1.2.tar.xz"
+      }
+    },
     "flake-compat": {
       "flake": false,
       "locked": {
@@ -210,6 +223,7 @@
     },
     "root": {
       "inputs": {
+        "ffmpeg-src": "ffmpeg-src",
         "fmt-src": "fmt-src",
         "lua-src": "lua-src",
         "mosh-src": "mosh-src",

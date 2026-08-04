@@ -49,9 +49,13 @@
     url = "github:redis/redis/8.2.2";
     flake = false;
   };
+  inputs.ffmpeg-src = {
+    url = "https://ffmpeg.org/releases/ffmpeg-7.1.2.tar.xz";
+    flake = false;
+  };
 
   outputs =
-    { self, nixpkgs, nix-15793, lua-src, fmt-src, mosh-src, redis-src }:
+    { self, nixpkgs, nix-15793, lua-src, fmt-src, mosh-src, redis-src, ffmpeg-src }:
     let
       forEachSystem = f: builtins.mapAttrs (system: pkgs: f system pkgs) nixpkgs.legacyPackages;
     in
@@ -252,6 +256,13 @@
             src = redis-src;
           };
           redis = redisBuild.result;
+
+          ffmpegBuild = import ./examples/ffmpeg {
+            inherit mkNixggBuild;
+            inherit (pkgs) pkg-config perl nasm yasm gnumake which;
+            src = ffmpeg-src;
+          };
+          ffmpeg = ffmpegBuild.result;
         in
         toolchain
         // {
@@ -264,7 +275,7 @@
           # mkNixggBuild is a function; expose so consumers can build
           # their own targets in downstream flakes.
           inherit mkNixggBuild;
-          inherit hello lua fmt mosh redis;
+          inherit hello lua fmt mosh redis ffmpeg;
           # Per-example dev shells (plain mkShell mirroring the outer
           # stdenv env) — `nix develop .#<name>-shell` gives native
           # mode the same buildInputs/setup-hooks the sandbox has.
@@ -274,6 +285,7 @@
           fmt-shell = fmtBuild.shell;
           mosh-shell = moshBuild.shell;
           redis-shell = redisBuild.shell;
+          ffmpeg-shell = ffmpegBuild.shell;
           default = envShell;
         }
       );
