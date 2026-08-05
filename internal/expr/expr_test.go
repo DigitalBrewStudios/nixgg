@@ -172,3 +172,78 @@ func TestShellQuoteFlagsMatchesNixHelper(t *testing.T) {
 		})
 	}
 }
+
+// TestLinkScriptEmitsLibFlagsAfterInputs pins ld's resolution order in
+// the emitted link script: objects and archives must come BEFORE any
+// `-l<name>`.
+//
+// Regression origin (ffmpeg): script() emitted `cc <flags> <inputs>`,
+// putting -lm/-latomic ahead of libavutil.a. The classic single-pass
+// linker only resolves a library against objects it has already seen, so
+// every math symbol referenced from those archives came up undefined
+// ("undefined reference to `sqrt'"). Fixed by splitting flags so -l
+// lands after the inputs.
+//
+// Also pins the len(lflags)==0 fallback. That branch keeps drv content
+// byte-identical to the pre-split era, and hello/lua/mosh have no -l
+// flags at all, so their 78 pinned drv hashes depend on it. Without the
+// fallback the split introduced a trailing empty slot and a double
+// space, which broke equivalence.
+func TestLinkScriptEmitsLibFlagsAfterInputs(t *testing.T) {
+	base := func(flags []string) *Derivation {
+		return &Derivation{
+			Kind:      KindLink,
+			Tool:      "cc",
+			OutName:   "prog",
+			Coreutils: "/COREUTILS",
+			Compiler:  "/GCC",
+			Flags:     flags,
+			Inputs: []derivInput{
+				{InputKind: "store", Ref: "/nix/store/" + strings.Repeat("a", 32) + "-tu-main.o", Name: "main.o"},
+				{InputKind: "store", Ref: "/nix/store/" + strings.Repeat("b", 32) + "-ar-libx.a", Name: "libx.a"},
+			},
+		}
+	}
+
+	t.Run("-l comes after inputs", func(t *testing.T) {
+		s := base([]string{"-O2", "-lm", "-Wl,-E", "-ldl"}).script()
+
+		iLast := strings.LastIndex(s, "libx.a'")
+		for _, lf := range []string{"'-lm'", "'-ldl'"} {
+			at := strings.Index(s, lf)
+			if at < 0 {
+				t.Fatalf("%s missing from script:\n%s", lf, s)
+			}
+			if at < iLast {
+				t.Errorf("%s appears BEFORE the last input — single-pass ld will "+
+					"not resolve symbols that inputs reference from it\nscript:\n%s", lf, s)
+			}
+		}
+		// Non -l flags must stay ahead of the inputs.
+		if o := strings.Index(s, "'-O2'"); o > iLast {
+			t.Errorf("-O2 moved after inputs; only -l flags should be relocated\n%s", s)
+		}
+		if w := strings.Index(s, "'-Wl,-E'"); w > iLast {
+			t.Errorf("-Wl,-E moved after inputs; it is not a -l flag\n%s", s)
+		}
+	})
+
+	t.Run("no -l flags keeps the historical layout", func(t *testing.T) {
+		s := base([]string{"-O2", "-Wl,-E"}).script()
+		if strings.Contains(s, "  ") {
+			t.Errorf("double space in script — the -l split must fall back to the "+
+				"pre-split layout when there are no -l flags, or the 78 pinned "+
+				"hello/lua/mosh drv hashes change:\n%q", s)
+		}
+	})
+
+	t.Run("bare -l is not treated as a lib flag", func(t *testing.T) {
+		// `-l` alone (len == 2) has no name attached; it must not be
+		// relocated, matching the len(f) > 2 guard.
+		s := base([]string{"-l"}).script()
+		iLast := strings.LastIndex(s, "libx.a'")
+		if at := strings.Index(s, "'-l'"); at > iLast {
+			t.Errorf("bare -l was relocated as if it named a library:\n%s", s)
+		}
+	})
+}
