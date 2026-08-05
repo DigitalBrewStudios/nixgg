@@ -233,82 +233,100 @@
           # inside `nix develop /path/to/nixgg`; the resulting drvs
           # (compile drvs for main.o + util.o, link drv for hello)
           # are byte-identical between the two modes.
-          # Each example is exposed as three attrs:
-          #   .#<name>      → resolved artifact (builtins.outputOf …)
-          #   .#<name>-drv  → the outer stdenv drv (`nix develop` target
-          #                    for tests/drv-equivalence.sh: same
-          #                    buildInputs / setup-hooks as sandbox)
-          helloBuild = import ./dyn-drv/hello-mkbuild.nix {
-            inherit mkNixggBuild;
-            inherit (pkgs) lib;
+          # Every example is one entry here: the directory to import and
+          # the args it needs beyond `mkNixggBuild`. Adding an example
+          # used to mean editing three places (an import block, a
+          # `foo = fooBuild.result;`, and a `foo-shell` in the output
+          # set) — which is how two-phase ended up with no -shell attr.
+          # Now it is one entry, and the -shell is generated.
+          #
+          # `nix build .#lua` builds the sandbox version; native
+          # equivalence is pinned by tests/drv-equivalence.sh.
+          exampleDefs = {
+            # hello lives in dyn-drv/ rather than examples/: it is the
+            # in-tree smoke fixture, built from nixgg/example/.
+            hello = {
+              dir = ./dyn-drv/hello-mkbuild.nix;
+              args = { inherit (pkgs) lib; };
+            };
+            lua = {
+              dir = ./examples/lua;
+              args = { src = lua-src; };
+            };
+            fmt = {
+              dir = ./examples/fmt;
+              args = { inherit (pkgs) cmake ninja pkg-config; src = fmt-src; };
+            };
+            mosh = {
+              dir = ./examples/mosh;
+              args = {
+                inherit (pkgs)
+                  autoconf automake libtool pkg-config perl protobuf which
+                  gnum4 gnugrep gnused gawk file
+                  ncurses openssl zlib abseil-cpp;
+                src = mosh-src;
+              };
+            };
+            redis = {
+              dir = ./examples/redis;
+              args = {
+                inherit (pkgs) which pkg-config python3 lua gnugrep gnused gawk;
+                src = redis-src;
+              };
+            };
+            ffmpeg = {
+              dir = ./examples/ffmpeg;
+              args = {
+                inherit (pkgs) pkg-config perl nasm yasm gnumake which;
+                src = ffmpeg-src;
+              };
+            };
+            # Two sources, no single `src`: phase 1 builds the codegen
+            # tool, phase 2 execs it mid-build. Smoke test for the
+            # phase-chaining pattern examples/llvm relies on.
+            two-phase = {
+              dir = ./examples/two-phase;
+              args = {
+                inherit (pkgs) lib;
+                codegenSrc = ./examples/two-phase/codegen;
+                appSrc = ./examples/two-phase/app;
+              };
+            };
+            # llvm-src is a monorepo checkout, which already has llvm/,
+            # cmake/, and third-party/ side by side — exactly the layout
+            # llvm/CMakeLists.txt's `include()`s expect. No reassembly.
+            llvm = {
+              dir = ./examples/llvm;
+              args = {
+                inherit (pkgs) runCommand cmake ninja pkg-config python3 perl which
+                  libffi libxml2 ncurses zlib;
+                src = llvm-src;
+              };
+            };
           };
-          hello = helloBuild.result;
 
-          # Three out-of-tree examples driven from flake inputs. Each
-          # is a `mkNixggBuild` call site with its source pinned in
-          # flake.lock. `nix build .#lua` builds the sandbox version;
-          # native equivalence — same drv hashes when the shims run
-          # under a plain `nix develop -c make` in an extracted src
-          # tree — is pinned by tests/drv-equivalence.sh.
-          luaBuild = import ./examples/lua {
-            inherit mkNixggBuild;
-            src = lua-src;
-          };
-          lua = luaBuild.result;
+          # name -> the example's full attrset (.result, .shell, extras).
+          examples = builtins.mapAttrs
+            (_: def: import def.dir ({ inherit mkNixggBuild; } // def.args))
+            exampleDefs;
 
-          fmtBuild = import ./examples/fmt {
-            inherit mkNixggBuild;
-            inherit (pkgs) cmake ninja pkg-config;
-            src = fmt-src;
-          };
-          fmt = fmtBuild.result;
-
-          moshBuild = import ./examples/mosh {
-            inherit mkNixggBuild;
-            inherit (pkgs)
-              autoconf automake libtool pkg-config perl protobuf which
-              gnum4 gnugrep gnused gawk file
-              ncurses openssl zlib abseil-cpp;
-            src = mosh-src;
-          };
-          mosh = moshBuild.result;
-
-          redisBuild = import ./examples/redis {
-            inherit mkNixggBuild;
-            inherit (pkgs) which pkg-config python3 lua gnugrep gnused gawk;
-            src = redis-src;
-          };
-          redis = redisBuild.result;
-
-          ffmpegBuild = import ./examples/ffmpeg {
-            inherit mkNixggBuild;
-            inherit (pkgs) pkg-config perl nasm yasm gnumake which;
-            src = ffmpeg-src;
-          };
-          ffmpeg = ffmpegBuild.result;
-
-          twoPhaseBuild = import ./examples/two-phase {
-            inherit mkNixggBuild;
-            inherit (pkgs) lib;
-            codegenSrc = ./examples/two-phase/codegen;
-            appSrc = ./examples/two-phase/app;
-          };
-          two-phase = twoPhaseBuild.result;
-          two-phase-codegen = twoPhaseBuild.codegen;
-
-          # llvm-src is a monorepo checkout, which already has llvm/,
-          # cmake/, and third-party/ side by side — exactly the layout
-          # llvm/CMakeLists.txt's `include()`s expect. No reassembly.
-          llvmBuild = import ./examples/llvm {
-            inherit mkNixggBuild;
-            inherit (pkgs) runCommand cmake ninja pkg-config python3 perl which
-              libffi libxml2 ncurses zlib;
-            src = llvm-src;
-          };
-          llvm = llvmBuild.result;
+          # .#<name> is the resolved artifact; .#<name>-shell is the
+          # mkShell mirroring the sandbox env, which
+          # tests/drv-equivalence.sh uses to replay the build natively.
+          exampleResults = builtins.mapAttrs (_: e: e.result) examples;
+          exampleShells = pkgs.lib.mapAttrs' (n: e: pkgs.lib.nameValuePair "${n}-shell" e.shell) examples;
         in
         toolchain
+        // exampleResults   # .#hello .#lua .#fmt .#mosh .#redis .#ffmpeg .#two-phase .#llvm
+        // exampleShells    # .#<name>-shell for each of the above
         // {
+          # Extras an individual example exposes beyond .result/.shell.
+          # llvm's two tblgen phases are separately buildable so the
+          # chain can be smoke-tested a phase at a time.
+          llvm-min-tblgen = examples.llvm.llvm-min-tblgen;
+          llvm-tblgen = examples.llvm.llvm-tblgen;
+          two-phase-codegen = examples.two-phase.codegen;
+
           toolchain-json = toolchainJson;
           env-shell = envShell;
           mosh-env = moshEnv;
@@ -318,23 +336,6 @@
           # mkNixggBuild is a function; expose so consumers can build
           # their own targets in downstream flakes.
           inherit mkNixggBuild;
-          inherit hello lua fmt mosh redis ffmpeg llvm;
-          # LLVM intermediates (phase 1a/1b tools) exposed for
-          # smoke-testing the chain.
-          llvm-min-tblgen = llvmBuild.llvm-min-tblgen;
-          llvm-tblgen = llvmBuild.llvm-tblgen;
-          inherit two-phase two-phase-codegen;
-          # Per-example dev shells (plain mkShell mirroring the outer
-          # stdenv env) — `nix develop .#<name>-shell` gives native
-          # mode the same buildInputs/setup-hooks the sandbox has.
-          # Consumed by tests/drv-equivalence.sh.
-          hello-shell = helloBuild.shell;
-          lua-shell = luaBuild.shell;
-          fmt-shell = fmtBuild.shell;
-          mosh-shell = moshBuild.shell;
-          redis-shell = redisBuild.shell;
-          ffmpeg-shell = ffmpegBuild.shell;
-          llvm-shell = llvmBuild.shell;
           default = envShell;
         }
       );
@@ -417,3 +418,5 @@
         });
     };
 }
+
+# control-probe
