@@ -36,6 +36,29 @@ const (
 //   - cmake TryCompile scratch (path contains CMakeFiles/CMake{Scratch,Tmp})
 //
 // Every pattern here was added because a real project tripped it.
+//
+// Deliberately NOT consulted by the link or archive shims. It looks like
+// an omission — a `try_run` probe execs a link output, so surely the link
+// shim needs the same carveout? — but both reachable cases are already
+// handled elsewhere:
+//
+//   - autoconf AC_RUN_IFELSE and cmake try_run run at CONFIGURE time,
+//     and every example runs its configure phase under NIXGG_BYPASS=1.
+//     bypassed() returns before any mode check, so those links never
+//     reach this package at all.
+//
+//   - Build-time codegen tools (llvm-tblgen, protoc, a project's own
+//     generator) are NOT bypassed, and they are the real case. But there
+//     is no filename pattern that identifies them: llvm-tblgen looks
+//     exactly like llvm-config. Any guess would either miss tools or
+//     eagerly realise things that should stay lazy, forfeiting the
+//     parallelism that is the point of deferring. Those builds use the
+//     phase-chain pattern instead — see examples/two-phase for the
+//     minimal shape and examples/llvm for a three-phase real one, where
+//     phase N+1 consumes phase N's realised output via buildInputs.
+//
+// So: if you are here because a mid-build exec got a thunk or a drvref
+// stub, the fix is a phase split, not a new pattern in this file.
 func For(path string) Mode {
 	base := filepath.Base(path)
 	switch {
