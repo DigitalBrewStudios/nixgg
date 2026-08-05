@@ -61,6 +61,54 @@ let
     else "bin-";
   drvName = "${targetPrefix}${targetBase}.drv";
 
+  # Shell prelude shared by the sandbox build (`preBuild`) and the
+  # native-replay dev shell (`shellHook`).
+  #
+  # These two MUST produce identical NIX_CFLAGS_COMPILE / NIX_LDFLAGS.
+  # `preBuild` is what the shims capture in sandbox mode; `shellHook` is
+  # what they capture when tests/drv-equivalence.sh replays the same
+  # build natively under `nix develop`. Any difference between them
+  # shows up as a drv-hash divergence between the two modes — i.e. it
+  # breaks the invariant the whole test suite exists to protect.
+  #
+  # It used to be two hand-synced copies of this text. They happened to
+  # agree, but a one-sided edit would only ever be caught by the slow
+  # integration test (which needs a builder-rpc-v0 nix and a remote
+  # builder) — the same "kept identical by discipline" trap that
+  # produced a real quoting bug between internal/expr's shellQuoteFlags
+  # and nix/{builder,linker}.nix. One source, interpolated twice.
+  #
+  # Rationale for each scrub:
+  #   - NIX_HARDENING_ENABLE: outer cc-wrapper marker. Inner drvs get
+  #     their own wrapper with its own defaults; leaking this makes
+  #     sandbox-produced drvs diverge from native (mkShellNoCC) ones.
+  #   - CC/CXX/AR/LD/...: stdenv defaults them to cc/c++/ar. Under
+  #     mkShellNoCC they aren't set, so the caller's Makefile picks its
+  #     own default (usually `c++` via `?=`). Unsetting lets both modes
+  #     converge on the same tool name.
+  #   - -frandom-seed=... : per-invocation, so poisonous to CA-hash
+  #     stability.
+  #   - -rpath <...>/outputs/out/lib and -rpath /nonexistent/lib:
+  #     bintools-wrapper always injects one off the derivation's $out,
+  #     which is /nonexistent in the sandbox (see the out= trick below)
+  #     and <workdir>/outputs/out under `nix develop`. Per-path, and not
+  #     real linker information for a build whose actual output is a
+  #     submitted drv.
+  #
+  # NOT scrubbed: NIX_CC_WRAPPER_TARGET_HOST_<triple>. Bypass-mode
+  # configure steps exec-passthrough to the outer gcc-wrapper, which
+  # needs that trigger to inject buildInputs' -isystem / -L. wrapperenv
+  # gates propagation into the inner drv on non-empty flags, so
+  # empty-buildInputs builds still hash identically to native.
+  scrubWrapperEnv = ''
+    export PATH="${nixgg}/bin:${nixgg}/shims:${patchedNix}/bin:$PATH"
+    unset NIX_HARDENING_ENABLE
+    unset CC CXX LD AR RANLIB NM STRIP OBJCOPY OBJDUMP READELF SIZE
+    NIX_CFLAGS_COMPILE=$(printf '%s' "''${NIX_CFLAGS_COMPILE:-}" | sed -e 's| *-frandom-seed=[^ ]*||g')
+    NIX_LDFLAGS=$(printf '%s' "''${NIX_LDFLAGS:-}" | sed -e 's| *-rpath [^ ]*/outputs/out/lib||g' -e 's| *-rpath /nonexistent/lib||g')
+    export NIX_CFLAGS_COMPILE NIX_LDFLAGS
+  '';
+
   drv = stdenv.mkDerivation {
     name = drvName;
     inherit src;
@@ -108,57 +156,15 @@ let
     NIXGG_SANDBOX        = "1";
     NIXGG_SANDBOX_TARGET = target;
 
-    # Prepend nixgg's shims/ before the toolchain so cc/c++/ar
-    # dispatch through us. stdenv's setup put its own gcc-wrapper's
-    # bin/ on PATH earlier; we go in front.
-    #
-    # patchedNix's bin/ is what our shims exec for `nix derivation
-    # add` etc.
-    #
-    # Strip stdenv's outer-sandbox noise from the wrapper env: the
-    # cc-wrapper's activation hook injects `-frandom-seed=<per-run>`
-    # (breaks CA-hash stability) and `-rpath /nonexistent/lib`
-    # (points at mkNixggBuild's fake $out). Also drop NIX_HARDENING_ENABLE
-    # — inner drvs get their own gcc-wrapper with its own defaults.
-    # buildInputs's contribution (-isystem / -L / -rpath into real
-    # store paths) stays: those were added AFTER these noise flags
-    # by stdenv's setup-hooks, so filtering the noise while keeping
-    # per-input flags is the goal.
-    preBuild = ''
-      export PATH="${nixgg}/bin:${nixgg}/shims:${patchedNix}/bin:$PATH"
-
-      # Scrub stdenv's outer-sandbox noise from the wrapper env before
-      # the shims capture it. Rationale:
-      #   - NIX_HARDENING_ENABLE / NIX_CC_WRAPPER_TARGET_HOST_<triple>:
-      #     outer cc-wrapper markers — inner drvs get their own wrapper
-      #     with its own defaults; leaking these makes sandbox-produced
-      #     drvs diverge from native (mkShellNoCC) drvs.
-      #   - CC/CXX/AR/LD: stdenv defaults them to c++/cc/ar. Under
-      #     mkShellNoCC these aren't set, and the caller's Makefile
-      #     picks its own default (usually `c++` via `?=`). Unsetting
-      #     lets both modes converge.
-      #   - -frandom-seed=... and -rpath /nonexistent/lib in
-      #     NIX_CFLAGS_COMPILE / NIX_LDFLAGS: baked in by cc-wrapper's
-      #     setup-hook off the outer drv's $out=/nonexistent trick.
-      #     Per-run and per-path, so poisonous to CA-hash stability.
-      unset NIX_HARDENING_ENABLE
-      unset CC CXX LD AR RANLIB NM STRIP OBJCOPY OBJDUMP READELF SIZE
-      # NIX_CC_WRAPPER_TARGET_HOST_<triple> stays: bypass-mode configure
-      # steps exec-passthrough to the outer gcc-wrapper, which needs
-      # the trigger to inject buildInputs -isystem / -L. wrapperenv
-      # gates propagation to the inner drv on non-empty flags, so
-      # empty-buildInputs builds still hash identically to native.
-      # Strip per-run noise: -frandom-seed (per-invocation) and
-      # `-rpath <workdir>/outputs/out/lib` (bintools-wrapper always
-      # injects one off the derivation's $out, which is /nonexistent
-      # in the sandbox and <workdir>/outputs/out under nix develop).
-      # Both would leak into every inner drv's env and break
-      # CA-hash stability; neither is real linker information for a
-      # build whose actual output is a submitted drv.
-      NIX_CFLAGS_COMPILE=$(printf '%s' "''${NIX_CFLAGS_COMPILE:-}" | sed -e 's| *-frandom-seed=[^ ]*||g')
-      NIX_LDFLAGS=$(printf '%s' "''${NIX_LDFLAGS:-}" | sed -e 's| *-rpath [^ ]*/outputs/out/lib||g' -e 's| *-rpath /nonexistent/lib||g')
-      export NIX_CFLAGS_COMPILE NIX_LDFLAGS
-    '';
+    # See scrubWrapperEnv above for what this does and why. Two points
+    # specific to the sandbox side: the shims/ dir goes ahead of the
+    # toolchain stdenv already put on PATH so cc/c++/ar dispatch through
+    # us, and patchedNix's bin/ is what those shims exec for `nix
+    # derivation add`. buildInputs' own contribution (-isystem / -L /
+    # -rpath into real store paths) survives the scrub: stdenv's
+    # setup-hooks add those AFTER the per-run noise, so filtering the
+    # noise keeps the per-input flags.
+    preBuild = scrubWrapperEnv;
 
     buildPhase = ''
       runHook preBuild
@@ -191,21 +197,7 @@ let
     # duplicating build recipes. Consumers pull it out with
     # `nix eval --raw .#<attr>-shell.passthru.buildCommand`.
     passthru.buildCommand = buildCommand;
-    shellHook = ''
-      export PATH="${nixgg}/bin:${nixgg}/shims:${patchedNix}/bin:$PATH"
-      unset NIX_HARDENING_ENABLE
-      unset CC CXX LD AR RANLIB NM STRIP OBJCOPY OBJDUMP READELF SIZE
-      # Strip per-run noise: -frandom-seed (per-invocation) and
-      # `-rpath <workdir>/outputs/out/lib` (bintools-wrapper always
-      # injects one off the derivation's $out, which is /nonexistent
-      # in the sandbox and <workdir>/outputs/out under nix develop).
-      # Both would leak into every inner drv's env and break
-      # CA-hash stability; neither is real linker information for a
-      # build whose actual output is a submitted drv.
-      NIX_CFLAGS_COMPILE=$(printf '%s' "''${NIX_CFLAGS_COMPILE:-}" | sed -e 's| *-frandom-seed=[^ ]*||g')
-      NIX_LDFLAGS=$(printf '%s' "''${NIX_LDFLAGS:-}" | sed -e 's| *-rpath [^ ]*/outputs/out/lib||g' -e 's| *-rpath /nonexistent/lib||g')
-      export NIX_CFLAGS_COMPILE NIX_LDFLAGS
-
+    shellHook = scrubWrapperEnv + ''
       export NIXGG_ROOT="${nixgg}"
       export NIXGG_COMPILER_ROOT="${gcc}"
       export NIXGG_BASH_ROOT="${bash}"
