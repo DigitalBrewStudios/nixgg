@@ -202,22 +202,55 @@ func parseLinkArgs(args []string) (output string, inputs, flags []string, ok boo
 // symlink in native). Returns the matching path so the caller can
 // treat it as a link input and drop the -l flag; empty string
 // means "not ours, leave -l<name> alone for the linker to try".
+// resolveLibFlag maps a `-l` argument to a file in one of the `-L`
+// directories, but only when that file is something nixgg produced.
+//
+// `name` is the text after `-l`. Two spellings:
+//   - `-lfoo`        → name "foo",        look for lib<name>.a
+//   - `-l:libfoo.a`  → name ":libfoo.a",  look for that exact filename
+//
+// The `:` form is how build systems pin a static archive when a shared
+// one also exists; ld takes the name literally rather than expanding
+// lib…/.a. ffmpeg and some autotools projects emit it.
+//
+// Returns "" when nothing matched, or when the match is a file we did
+// not create — a vendored or system archive must stay a `-l` flag so
+// the linker resolves it normally. Claiming one would reference a drv
+// input that doesn't exist.
 func resolveLibFlag(name string, libDirs []string) string {
+	if name == "" {
+		return ""
+	}
+	// Candidate filename(s) to look for in each -L dir.
+	var files []string
+	if strings.HasPrefix(name, ":") {
+		exact := name[1:]
+		if exact == "" || strings.ContainsRune(exact, filepath.Separator) {
+			// `-l:` with nothing, or with a path separator, is not a
+			// plain filename — leave it to the linker.
+			return ""
+		}
+		files = []string{exact}
+	} else {
+		files = []string{"lib" + name + ".a"}
+	}
 	for _, d := range libDirs {
-		cand := filepath.Join(d, "lib"+name+".a")
-		fi, err := os.Lstat(cand)
-		if err != nil {
-			continue
-		}
-		if fi.Mode()&os.ModeSymlink != 0 {
-			// Native mode: symlink to a .nix thunk or a .drv path.
-			return cand
-		}
-		// Sandbox mode: drvref stub is a small regular file with
-		// our magic header. Peek at the first byte cheaply.
-		if fi.Mode().IsRegular() && fi.Size() < 4096 {
-			if hasNixggDrvRef(cand) {
+		for _, f := range files {
+			cand := filepath.Join(d, f)
+			fi, err := os.Lstat(cand)
+			if err != nil {
+				continue
+			}
+			if fi.Mode()&os.ModeSymlink != 0 {
+				// Native mode: symlink to a .nix thunk or a .drv path.
 				return cand
+			}
+			// Sandbox mode: drvref stub is a small regular file with
+			// our magic header. Peek at the first byte cheaply.
+			if fi.Mode().IsRegular() && fi.Size() < 4096 {
+				if hasNixggDrvRef(cand) {
+					return cand
+				}
 			}
 		}
 	}
@@ -238,11 +271,64 @@ func hasNixggDrvRef(path string) bool {
 	return n == len(buf) && string(buf) == "#!nixgg-drvref\n"
 }
 
+// isLinkInput reports whether a token is a file the linker consumes,
+// as opposed to a flag.
+//
+// A token we fail to recognize here does NOT fall through to
+// Passthrough — parseLinkArgs files it under `flags`, so it gets baked
+// into the drv as a bare relative path. Inside the sandbox that path
+// doesn't exist (only staged inputs do), so the link fails at best and
+// silently resolves to something else at worst. Recognizing a token is
+// what routes it through classify.Target, which is the actual safety
+// net: an unowned file classifies as Regular and triggers Passthrough.
+//
+// Anything starting with `-` is a flag, never a file. Without that
+// guard `-l:libfoo.a` (the exact-name form of -l) has filepath.Ext
+// ".a" and is mistaken for an archive; classify.Target then stats a
+// file literally named "-l:libfoo.a", gets Absent, and passes through —
+// accidentally safe, but for the wrong reason. resolveLibFlag handles
+// that form properly.
 func isLinkInput(a string) bool {
+	if a == "" || strings.HasPrefix(a, "-") {
+		return false
+	}
 	// .o (object), .a (archive), .xo (redis's position-independent
 	// object for its shared-object test modules), .lo (libtool object).
 	ext := strings.ToLower(filepath.Ext(a))
-	return ext == ".o" || ext == ".a" || ext == ".xo" || ext == ".lo"
+	if ext == ".o" || ext == ".a" || ext == ".xo" || ext == ".lo" {
+		return true
+	}
+	// Shared libraries, including the versioned `libfoo.so.1.2.3` form
+	// that filepath.Ext reports as ".3". A positional .so on the link
+	// line is an input like any other.
+	return isSharedLib(a)
+}
+
+// isSharedLib matches `libfoo.so` and versioned `libfoo.so.1[.2[.3]]`.
+// Checked as a `.so` segment rather than a suffix so that a file merely
+// ending in a number (`foo.1`) doesn't match.
+func isSharedLib(a string) bool {
+	base := strings.ToLower(filepath.Base(a))
+	if strings.HasSuffix(base, ".so") {
+		return true
+	}
+	i := strings.Index(base, ".so.")
+	if i < 0 {
+		return false
+	}
+	// Every remaining segment after `.so.` must be numeric, so
+	// `libfoo.so.1.2` matches but `libfoo.solid.txt` does not.
+	for _, seg := range strings.Split(base[i+len(".so."):], ".") {
+		if seg == "" {
+			return false
+		}
+		for _, r := range seg {
+			if r < '0' || r > '9' {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // altStorePrefix returns the on-disk root for `local?root=...` stores.

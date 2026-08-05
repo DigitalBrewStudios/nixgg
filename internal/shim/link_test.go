@@ -150,3 +150,114 @@ func TestResolveLibFlagOnlyClaimsOurArtifacts(t *testing.T) {
 		t.Errorf("nonexistent lib claimed: %q", got)
 	}
 }
+
+// TestIsLinkInput pins which link-line tokens are files the linker
+// consumes. Getting this wrong is silently wrong, not loudly wrong: an
+// unrecognized token is filed under `flags` by parseLinkArgs and baked
+// into the drv as a bare relative path that does not exist in the
+// sandbox. Recognizing a token is what routes it through
+// classify.Target, whose Regular/Absent verdicts trigger Passthrough.
+func TestIsLinkInput(t *testing.T) {
+	for _, tc := range []struct {
+		in   string
+		want bool
+	}{
+		{"main.o", true},
+		{"libfoo.a", true},
+		{"mod.xo", true},   // redis's PIC objects for test modules
+		{"thing.lo", true}, // libtool
+		{"MAIN.O", true},   // ext match is case-insensitive
+		{"sub/dir/main.o", true},
+
+		// Shared libraries, plain and versioned. filepath.Ext reports
+		// ".2" for the last one, which is why this needs its own check.
+		{"libfoo.so", true},
+		{"libfoo.so.1", true},
+		{"libfoo.so.1.2", true},
+		{"libfoo.so.1.2.3", true},
+		{"/abs/path/libfoo.so.1", true},
+
+		// Flags are never inputs. Without the leading-dash guard,
+		// `-l:libexact.a` has filepath.Ext ".a" and is mistaken for an
+		// archive — classify.Target then stats a file literally named
+		// "-l:libexact.a", gets Absent, and passes through. Safe, but
+		// only by accident; resolveLibFlag is the correct handler.
+		{"-l:libexact.a", false},
+		{"-lfoo", false},
+		{"-o", false},
+		{"-Wl,--as-needed", false},
+		{"-L/usr/lib", false},
+
+		// Not libraries despite superficial resemblance.
+		{"libfoo.solid", false},
+		{"libfoo.so.1.x", false}, // non-numeric version segment
+		{"libfoo.so.", false},    // empty trailing segment
+		{"notes.txt", false},
+		{"main.c", false},
+		{"", false},
+	} {
+		t.Run(tc.in, func(t *testing.T) {
+			if got := isLinkInput(tc.in); got != tc.want {
+				t.Errorf("isLinkInput(%q) = %v, want %v", tc.in, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestParseLinkArgsSharedLibIsAnInput pins that a positional shared
+// library reaches `inputs`, not `flags`. As a flag it would be baked
+// into the drv as a bare path with no corresponding staged file.
+func TestParseLinkArgsSharedLibIsAnInput(t *testing.T) {
+	_, inputs, flags, ok := parseLinkArgs(
+		[]string{"main.o", "libfoo.so", "libbar.so.1.2", "-o", "prog"})
+	if !ok {
+		t.Fatal("parseLinkArgs returned !ok")
+	}
+	want := []string{"main.o", "libfoo.so", "libbar.so.1.2"}
+	if !reflect.DeepEqual(inputs, want) {
+		t.Errorf("inputs = %q, want %q", inputs, want)
+	}
+	for _, f := range flags {
+		if strings.Contains(f, ".so") {
+			t.Errorf("shared lib landed in flags (%q) — it would be baked into "+
+				"the drv as a path that does not exist in the sandbox", flags)
+		}
+	}
+}
+
+// TestResolveLibFlagExactNameForm pins `-l:libfoo.a`, the spelling build
+// systems use to pin a static archive when a shared one also exists (ld
+// takes the name literally instead of expanding lib…/.a).
+func TestResolveLibFlagExactNameForm(t *testing.T) {
+	dir := t.TempDir()
+	stub := filepath.Join(dir, "libexact.a")
+	body := "#!nixgg-drvref\n/nix/store/" + strings.Repeat("a", 32) + "-ar-libexact.a.drv\n"
+	if err := os.WriteFile(stub, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A foreign archive under the exact-name form must NOT be claimed.
+	foreign := filepath.Join(dir, "libforeign.a")
+	if err := os.WriteFile(foreign, []byte("!<arch>\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		arg  string
+		want string
+	}{
+		{"exact name resolves to our stub", ":libexact.a", stub},
+		{"plain name still works", "exact", stub},
+		{"foreign archive not claimed", ":libforeign.a", ""},
+		{"absent file", ":libnope.a", ""},
+		{"bare -l: is not a filename", ":", ""},
+		{"path separator is not a plain filename", ":sub/libexact.a", ""},
+		{"empty name", "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := resolveLibFlag(tc.arg, []string{dir}); got != tc.want {
+				t.Errorf("resolveLibFlag(%q) = %q, want %q", tc.arg, got, tc.want)
+			}
+		})
+	}
+}
