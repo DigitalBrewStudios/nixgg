@@ -399,7 +399,31 @@ cache (mtime-based) would drop this to sub-second.
   re-runs the shim pass and pipes each JSON drv through `nix
   derivation add`. Same drv-hash → same store path via Nix's eval
   cache, so no wasted builds, but the fork+exec overhead accumulates
-  on projects with many TUs.
+  on projects with many TUs. Measured at ~44-90ms per call, so a
+  few-hundred-TU build spends tens of seconds here.
+
+  **The obvious fix does not work.** A file cache under `.nixgg/`
+  keyed on the thunk id (already a content hash) looks like the
+  answer, but sandbox-mode shims run inside a *fresh, ephemeral*
+  builder-rpc-v0 sandbox per top-level `nix build`: `mkNixggBuild`
+  mounts no persistent host path (no `sandboxPaths`), `dontUnpack =
+  false` re-unpacks `src` every build, and `paths.Resolve` anchors
+  `.nixgg/` at `$PWD` — which inside the sandbox is the throwaway
+  build dir. Anything the shim writes is discarded before the next
+  `nix build` could read it, and the next build is exactly where the
+  amortization would have to happen. Making it work needs a
+  bind-mounted stable host cache dir plus a story for sandbox
+  isolation and build concurrency — a different, much larger change.
+  Don't re-propose the file cache on its own.
+
+  Batching via the raw Nix worker protocol (to avoid per-call
+  fork+exec entirely) is also a dead end for now: `nix derivation
+  add` has no batch mode (two concatenated JSON docs fail to parse),
+  and `dyn-drv/NOTES.md` already rejected writing a raw-protocol
+  client in favour of shelling out to the CLI. It would duplicate
+  nix-ninja's Rust worker-protocol client for an unproven benefit,
+  and cold-build cost is bounded by real compiler work anyway.
+
 - **Multi-target dyn-drv builds**. `mkNixggBuild` submits exactly
   one final drv. Projects with multiple binaries (lua's lua + luac,
   mosh's client + server — we currently target `mosh-server`; the
