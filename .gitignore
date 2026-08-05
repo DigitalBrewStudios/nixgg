@@ -1,4 +1,7 @@
 bin/
+# Shim workspace. The auto-seed walks up to the nearest .git, so
+# running shims anywhere in this repo lands one at the root.
+.nixgg/
 example/.nixgg/
 example/*.o
 example/hello

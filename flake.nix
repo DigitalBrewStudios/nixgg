@@ -203,8 +203,23 @@
             doCheck = false;
             postInstall = ''
               mkdir -p $out/shims
-              for t in ar c++ cc g++ gcc ranlib; do
+              # The six canonical names, plus clang/clang++ and the
+              # host-triple-prefixed spellings a configure script may
+              # pick. dispatch.FromArgv0 also strips version suffixes
+              # (gcc-15) and triple prefixes, but a shim only fires if a
+              # symlink with that exact name is on PATH — a name we
+              # don't link is a tool nixgg silently never accelerates.
+              #
+              # Not exhaustive by construction: the full cross product of
+              # triples and versions is unbounded. These cover what the
+              # examples and common autotools/cmake probes actually
+              # invoke; add more if a real project needs them.
+              for t in ar c++ cc g++ gcc ranlib clang clang++; do
                 ln -s ../bin/nixgg $out/shims/$t
+              done
+              for t in gcc g++ cc c++ ar ranlib; do
+                ln -s ../bin/nixgg $out/shims/x86_64-unknown-linux-gnu-$t
+                ln -s ../bin/nixgg $out/shims/x86_64-linux-gnu-$t
               done
             '';
           };

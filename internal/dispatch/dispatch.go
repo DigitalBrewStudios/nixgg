@@ -49,16 +49,54 @@ func (t Tool) Basename() string {
 
 // FromArgv0 classifies argv[0] (usually a symlink name like "cc"). We
 // look at the file basename, not the target of the symlink.
+// FromArgv0 classifies the tool role from the name we were invoked as.
+//
+// Beyond the six canonical names, real build systems invoke compilers
+// under target-triple and version decorations:
+//
+//	x86_64-unknown-linux-gnu-gcc   (cross / explicit-triple toolchains)
+//	gcc-15, clang-18               (versioned, Debian/Fedora style)
+//	x86_64-linux-gnu-g++-14        (both at once)
+//	llvm-ar, x86_64-…-ranlib       (binutils equivalents)
+//
+// A name we fail to classify returns ToolUnknown, and the shim then has
+// no role to play — acceleration silently never engages for that tool.
+// No error, no drv, nothing in the log: the build just quietly runs
+// unaccelerated. That is why this matcher is generous.
+//
+// Widening the INPUT side cannot change derivation content: every
+// accepted spelling maps onto one of the six roles, and Tool.Basename()
+// — which is what lands in the drv as toolBasename — returns one of the
+// same six canonical strings it always did. `gcc-15` is dispatched as
+// ToolGCC and the drv still says "gcc", so the sandbox resolves the
+// pinned compiler rather than the caller's versioned one. That is
+// deliberate: the drv must name a tool that exists inside it.
+//
+// clang/clang++ map onto the gcc/g++ roles for the same reason. nixgg
+// pins its own compiler, so the role only selects C vs C++ mode.
 func FromArgv0(argv0 string) Tool {
 	base := filepath.Base(argv0)
+
+	// Strip a trailing version decoration: `gcc-15`, `clang++-18`,
+	// `g++-14.2`. Only digits and dots, so a real name containing a
+	// dash (`x86_64-linux-gnu-gcc`) is untouched here.
+	base = stripVersionSuffix(base)
+
+	// Strip a leading target triple: `x86_64-unknown-linux-gnu-gcc`.
+	// The tool name is the final dash-separated field; taking only the
+	// last field also handles `llvm-ar` and `llvm-ranlib`.
+	if i := strings.LastIndexByte(base, '-'); i >= 0 && i+1 < len(base) {
+		base = base[i+1:]
+	}
+
 	switch base {
 	case "cc":
 		return ToolCC
-	case "gcc":
+	case "gcc", "clang":
 		return ToolGCC
-	case "c++":
+	case "c++", "cxx", "CC":
 		return ToolCXX
-	case "g++":
+	case "g++", "clang++":
 		return ToolGXX
 	case "ar":
 		return ToolAR
@@ -66,6 +104,23 @@ func FromArgv0(argv0 string) Tool {
 		return ToolRanlib
 	}
 	return ToolUnknown
+}
+
+// stripVersionSuffix removes a trailing `-<digits>[.<digits>…]`, the
+// shape package managers use for parallel-installable compilers
+// (`gcc-15`, `clang++-18`, `g++-14.2`). Anything else is left alone, so
+// a triple like `…-linux-gnu-gcc` keeps its final field intact.
+func stripVersionSuffix(base string) string {
+	i := strings.LastIndexByte(base, '-')
+	if i < 0 || i+1 >= len(base) {
+		return base
+	}
+	for _, r := range base[i+1:] {
+		if (r < '0' || r > '9') && r != '.' {
+			return base
+		}
+	}
+	return base[:i]
 }
 
 // Action is what a compiler-family shim decides to do based on argv.
