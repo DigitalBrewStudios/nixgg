@@ -51,6 +51,15 @@ type Result struct {
 	// StoreIFlags are `-I/nix/store/...` flags passed verbatim (system
 	// dependencies from wrapper env).
 	StoreIFlags []string
+	// StagedIncludeFlags are `-include <rel>` flags rewritten to point
+	// at the staged copy of each force-included header, relative to the
+	// staged project root. Emitted by rewriteFlags AFTER the -I flags so
+	// the header resolves against the staged tree.
+	//
+	// A force-included header that resolves outside projectRoot (a
+	// system or store path) is passed through verbatim instead — see
+	// the loop that builds this.
+	StagedIncludeFlags []string
 }
 
 // Run scans a single compile invocation.
@@ -156,6 +165,7 @@ func runScanner(cc, source string, flags []string) (*Result, []depEntry, error) 
 	// (-I/path) and separated (-I /path) forms; also -isystem, -iquote,
 	// -idirafter, -include.
 	includeDirs := extractIncludeDirs(flags)
+	forceIncludes := extractForceIncludes(flags)
 
 	// The project root is the common ancestor of cwd + the source
 	// dir + every non-store include dir. Include the source dir
@@ -292,11 +302,41 @@ func runScanner(cc, source string, flags []string) (*Result, []depEntry, error) 
 		storeFlags = append(storeFlags, "-I"+d)
 	}
 
+	// `-include <file>` rewritten to point at the staged copy. The file
+	// itself is already in `headers` (scan's -MM -MG saw it as a
+	// dependency), so it lands in the staging tree at its
+	// projectRoot-relative path; the flag has to follow it there.
+	//
+	// A force-include resolving to /nix/store or otherwise outside
+	// projectRoot isn't staged, so pass it through verbatim — the
+	// sandbox mounts store paths, and storedeps.From will pick up the
+	// reference from the flag text.
+	var includeFlags []string
+	for _, f := range forceIncludes {
+		abs := f
+		if !filepath.IsAbs(abs) {
+			abs = filepath.Join(cwd, f)
+		}
+		if strings.HasPrefix(abs, "/nix/store/") {
+			includeFlags = append(includeFlags, "-include", abs)
+			continue
+		}
+		rel, err := filepath.Rel(projectRoot, abs)
+		if err != nil || strings.HasPrefix(rel, "..") {
+			// Outside the staged tree entirely; keep the absolute path
+			// rather than emitting a relative path that won't resolve.
+			includeFlags = append(includeFlags, "-include", abs)
+			continue
+		}
+		includeFlags = append(includeFlags, "-include", rel)
+	}
+
 	return &Result{
 		Headers:      headers,
 		ProjectRoot:  projectRoot,
 		StagedIFlags: iflags,
 		StoreIFlags:  storeFlags,
+		StagedIncludeFlags: includeFlags,
 	}, deps, nil
 }
 
@@ -310,11 +350,17 @@ func statOr(abs string) depEntry {
 
 // extractIncludeDirs walks flags and pulls out user-supplied include
 // paths from all the -I family (both attached and separated forms).
+// extractIncludeDirs walks flags and pulls out user-supplied include
+// DIRECTORIES. `-include` is deliberately absent from pathFlags: its
+// value is a FILE to force-include, not a directory to search. Treating
+// it as a dir emitted a bogus `-I<file>` (gcc: "not a directory") and,
+// worse, made rewriteFlags drop the `-include` entirely — silently
+// compiling with different preprocessor state. See extractForceIncludes.
 func extractIncludeDirs(flags []string) []string {
 	var out []string
 	pathFlags := map[string]bool{
 		"-I": true, "-isystem": true, "-iquote": true,
-		"-idirafter": true, "-include": true,
+		"-idirafter": true,
 	}
 	for i := 0; i < len(flags); i++ {
 		f := flags[i]
@@ -325,6 +371,30 @@ func extractIncludeDirs(flags []string) []string {
 		}
 		if strings.HasPrefix(f, "-I") && len(f) > 2 {
 			out = append(out, f[2:])
+		}
+	}
+	return out
+}
+
+// extractForceIncludes pulls out `-include <file>` values — headers the
+// caller wants prepended to the TU before its own text, the standard
+// autoconf/CMake way to inject a generated `config.h` full of
+// HAVE_XXX defines.
+//
+// These must survive into the drv. The header itself is already staged
+// (scan's own `gcc -MM -MG` reports it as a dependency like any other),
+// but the FLAG has to be re-emitted pointing at the staged copy, or the
+// TU compiles without those defines and the build succeeds with the
+// wrong preprocessor state and no diagnostic at all.
+//
+// Only the separated `-include <file>` form exists; gcc has no
+// `-include<file>` spelling, so there is no attached form to handle.
+func extractForceIncludes(flags []string) []string {
+	var out []string
+	for i := 0; i < len(flags); i++ {
+		if flags[i] == "-include" && i+1 < len(flags) {
+			out = append(out, flags[i+1])
+			i++
 		}
 	}
 	return out
@@ -453,6 +523,12 @@ func encodeResult(r *Result) ([]byte, error) {
 	for _, f := range r.StoreIFlags {
 		fmt.Fprintf(&b, "STORE_IFLAG=%s\n", f)
 	}
+	// One line per element, not per pair: StagedIncludeFlags is a flat
+	// ["-include", "<rel>", ...] slice and decode appends in order, so
+	// the pairing is preserved without special-casing.
+	for _, f := range r.StagedIncludeFlags {
+		fmt.Fprintf(&b, "STAGED_INCLUDE=%s\n", f)
+	}
 	for _, h := range r.Headers {
 		fmt.Fprintf(&b, "HEADER=%s\t%s\n", h.Abs, h.Rel)
 	}
@@ -471,6 +547,8 @@ func decodeResult(body []byte, r *Result) error {
 			r.StagedIFlags = append(r.StagedIFlags, strings.TrimPrefix(line, "STAGED_IFLAG="))
 		case strings.HasPrefix(line, "STORE_IFLAG="):
 			r.StoreIFlags = append(r.StoreIFlags, strings.TrimPrefix(line, "STORE_IFLAG="))
+		case strings.HasPrefix(line, "STAGED_INCLUDE="):
+			r.StagedIncludeFlags = append(r.StagedIncludeFlags, strings.TrimPrefix(line, "STAGED_INCLUDE="))
 		case strings.HasPrefix(line, "HEADER="):
 			rest := strings.TrimPrefix(line, "HEADER=")
 			tab := strings.IndexByte(rest, '\t')

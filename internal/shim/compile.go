@@ -131,7 +131,8 @@ func Compile(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.L
 	// (both attached and separated forms) then re-add our staged -I
 	// flags (relative to project root) and any store-prefixed -I flags
 	// verbatim.
-	sandboxFlags := rewriteFlags(flags, scanResult.StagedIFlags, scanResult.StoreIFlags)
+	sandboxFlags := rewriteFlags(flags, scanResult.StagedIFlags, scanResult.StoreIFlags,
+		scanResult.StagedIncludeFlags)
 
 	// 4. Build the expression.
 	wrapperEnvJSON, err := wrapperenv.JSON()
@@ -361,10 +362,17 @@ func isSource(a string) bool {
 // rewriteFlags produces the sandbox-flag list. Strip -I/-isystem/etc
 // pairs (both forms) since our staged -I flags cover the same
 // directories in the sandbox's layout; then append staged + store.
-func rewriteFlags(caller, staged, store []string) []string {
+//
+// `-include <file>` is handled separately via forceInc rather than being
+// stripped: its value is a header to prepend to the TU, not a directory
+// to search, so dropping it changes the preprocessor state the caller
+// asked for. scan.StagedIncludeFlags supplies the re-pointed form.
+// They go last so the -I flags they may resolve against are already in
+// effect.
+func rewriteFlags(caller, staged, store, forceInc []string) []string {
 	pathFlags := map[string]bool{
 		"-I": true, "-isystem": true, "-iquote": true,
-		"-idirafter": true, "-include": true,
+		"-idirafter": true,
 	}
 	var out []string
 	for i := 0; i < len(caller); i++ {
@@ -377,11 +385,19 @@ func rewriteFlags(caller, staged, store []string) []string {
 			continue
 		case strings.HasPrefix(a, "-I") && len(a) > 2:
 			continue
+		// Drop the caller's `-include <file>`; forceInc carries the
+		// staged-relative replacement appended below.
+		case a == "-include":
+			if i+1 < len(caller) {
+				i++
+			}
+			continue
 		}
 		out = append(out, a)
 	}
 	out = append(out, staged...)
 	out = append(out, store...)
+	out = append(out, forceInc...)
 	return out
 }
 
