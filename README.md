@@ -45,17 +45,104 @@ currently covers all four fixtures: `hello` (3 drvs), `lua` (37),
 `fmt` (3), `mosh` (38) — every drv matches byte-for-byte between the
 two modes.
 
+## Use it in your own project
+
+nixgg is a flake input. Pull in `mkNixggBuild` and call it with your
+own source, target, and build command — same function every example
+in this repo uses.
+
+Two things a consuming flake needs beyond the call itself: the
+experimental features that dynamic derivations require, and a Nix that
+can serve `builder-rpc-v0`. Both are shown below.
+
+```nix
+# flake.nix
+{
+  inputs.nixgg.url = "github:tomberek/nixgg";
+
+  # mkNixggBuild's output is a `builtins.outputOf` node, and its outer
+  # derivation asks for the builder-rpc-v0 system feature. Without
+  # these, `nix build` fails at eval with "experimental Nix feature
+  # 'dynamic-derivations' is disabled". Nix prompts you to trust these
+  # the first time; after that it Just Works.
+  nixConfig = {
+    extra-experimental-features = [
+      "ca-derivations"
+      "dynamic-derivations"
+      "configurable-impure-env"
+    ];
+    extra-system-features = [ "builder-rpc-v0" ];
+  };
+
+  outputs = { self, nixpkgs, nixgg }:
+    let
+      system = "x86_64-linux";
+      pkgs = nixpkgs.legacyPackages.${system};
+      mkNixggBuild = nixgg.packages.${system}.mkNixggBuild;
+    in
+    {
+      packages.${system}.default = (mkNixggBuild {
+        pname = "myproject";
+        version = "0.1.0";
+        src = ./.;
+        target = "myproject";      # basename the link shim submits as `out`
+        nativeBuildInputs = [ pkgs.pkg-config ];
+        buildInputs = [ pkgs.zlib ];
+        buildCommand = ''
+          make -j"$NIX_BUILD_CORES"
+        '';
+      }).result;
+    };
+}
+```
+
+You also need a Nix that implements `builder-rpc-v0` and `nix store
+submit-output` — that work lives on NixOS/nix master and is not in a
+released Nix yet. This flake exposes the build it pins:
+
+```sh
+# One-time: get a capable nix (substituted from cache.nixos.org).
+nix build github:tomberek/nixgg#patched-nix -o ./.patched-nix
+
+# Build your project with it.
+./.patched-nix/bin/nix build .
+```
+
+Stock Nix is fine for nixgg's **native** mode (thunks on disk, one
+`nix build` at the end); the patched Nix is only needed to consume a
+`mkNixggBuild` result, which is sandbox mode.
+
+See `examples/*/default.nix` for real-world call sites (lua, {fmt},
+mosh, redis, ffmpeg, and a 3-phase LLVM build). If your build execs one
+of its own binaries mid-build — codegen and bootstrap tools do this —
+read `examples/llvm/default.nix`: that needs two or more chained
+`mkNixggBuild` calls, since a not-yet-realised output can't be run.
+
+`mkNixggBuild`'s parameters:
+
+| param | required | meaning |
+|---|---|---|
+| `pname` | yes | naming only |
+| `version` | no (default `"0"`) | naming only |
+| `src` | yes | the source tree |
+| `target` | yes | path of the final artifact; its basename is matched against the link/archive shim's `-o` to decide what gets submitted as the derivation's output |
+| `buildCommand` | yes | shell run inside the sandbox once shims are on `PATH` — typically `make`/`cmake --build`/`ninja` |
+| `nativeBuildInputs` | no | build-time tools (compilers, generators, `pkg-config`) |
+| `buildInputs` | no | libraries the build links against |
+| `propagatedBuildInputs` | no | passed through to the underlying `stdenv.mkDerivation` |
+
+Every `mkNixggBuild` call also returns a `.shell` — a plain `mkShell`
+mirroring the sandbox's exact `stdenv` environment. `nix develop` into
+it when you need to reproduce a sandbox build by hand; it's what
+`tests/drv-equivalence.sh` uses to run the native side under the same
+tool env.
+
 ## Architecture
 
 Every shim writes a derivation. Nix does the rest. See
 [ARCHITECTURE.md](ARCHITECTURE.md) for the design and the shim
 mechanics. See [dyn-drv/NOTES.md](dyn-drv/NOTES.md) for the
 sandbox / dynamic-derivation exploration notes.
-
-The equivalence between native and sandbox modes is pinned by
-[tests/drv-equivalence.sh](tests/drv-equivalence.sh) — a regression
-test that builds the same source both ways and asserts the resulting
-drv-store-paths match byte-for-byte.
 
 ## Requirements
 
