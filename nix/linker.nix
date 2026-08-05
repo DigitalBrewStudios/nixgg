@@ -34,8 +34,8 @@ let
   isLFlag = f: builtins.substring 0 2 f == "-l" && builtins.stringLength f > 2;
   lflags     = builtins.filter isLFlag flags;
   nonLflags  = builtins.filter (f: !(isLFlag f)) flags;
-  quotedNonL = builtins.concatStringsSep " " (map (f: "'${f}'") nonLflags);
-  quotedL    = builtins.concatStringsSep " " (map (f: "'${f}'") lflags);
+  quotedNonL = import ./shell-quote-flags.nix nonLflags;
+  quotedL    = import ./shell-quote-flags.nix lflags;
   # When there are no -l flags, keep the historical layout (no
   # trailing empty slot in the shell command) so pre-existing drv
   # hashes stay stable.

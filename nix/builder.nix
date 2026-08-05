@@ -31,7 +31,7 @@ let
   # eval time and interpolates to `/nix/store/<hash>-<basename>` here.
   src         = srcTree;
   flags       = builtins.fromJSON flagsJSON;
-  quotedFlags = builtins.concatStringsSep " " (map (f: "'${f}'") flags);
+  quotedFlags = import ./shell-quote-flags.nix flags;
   storeDeps   = map pureStorePath (builtins.fromJSON storeDepsJSON);
   wrapperEnv  = builtins.fromJSON wrapperEnvJSON;
 in
