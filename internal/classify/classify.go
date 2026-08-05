@@ -3,14 +3,14 @@
 //
 // A caller-visible target is one of:
 //   - Store    → symlink resolves to /nix/store/…-tu-foo.o/…
-//                (already realised; use the store path as a reference)
+//     (already realised; use the store path as a reference)
 //   - Thunk    → symlink resolves to .../thunks/<id>.nix
-//                (not yet realised; the link/ar thunk `import`s it)
+//     (not yet realised; the link/ar thunk `import`s it)
 //   - Drv      → symlink resolves to /nix/store/…-tu-foo.o.drv
-//                (sandbox-mode: not yet realised; the link/ar drv
-//                references it via inputs.drvs)
+//     (sandbox-mode: not yet realised; the link/ar drv
+//     references it via inputs.drvs)
 //   - Regular  → real file or symlink to something nixgg doesn't own
-//                (passthrough — link/ar can't include it in a thunk)
+//     (passthrough — link/ar can't include it in a thunk)
 //   - Absent   → the path doesn't exist at all
 package classify
 
@@ -19,6 +19,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/tbereknyei/nixgg/internal/drvref"
 	"github.com/tbereknyei/nixgg/internal/paths"
 	"github.com/tbereknyei/nixgg/internal/thunk"
 )
@@ -93,7 +94,7 @@ func Target(path, altStorePrefix string, l paths.Layout) Result {
 		//      Written by sandbox.PointOutputAtDrv (see docstring).
 		//   2. A "promoted" store output (force copied bytes here).
 		//   3. Genuinely a regular file.
-		if ref := readDrvRef(path); ref != "" {
+		if ref := drvref.Path(path); ref != "" {
 			return Result{Kind: Drv, Ref: ref}
 		}
 		if l.Promoted != "" {
@@ -140,29 +141,6 @@ func storeRootOf(p string) string {
 		rest = rest[:slash]
 	}
 	return "/nix/store/" + rest
-}
-
-// readDrvRef reads the first ~1KB of a regular file and returns the
-// referenced drv store path if the file is a sandbox-mode drvref stub
-// (see sandbox.PointOutputAtDrv). Empty string means "not a drvref".
-func readDrvRef(path string) string {
-	const magic = "#!nixgg-drvref\n"
-	f, err := os.Open(path)
-	if err != nil {
-		return ""
-	}
-	defer f.Close()
-	buf := make([]byte, 1024)
-	n, _ := f.Read(buf)
-	body := string(buf[:n])
-	if !strings.HasPrefix(body, magic) {
-		return ""
-	}
-	rest := body[len(magic):]
-	if nl := strings.IndexByte(rest, '\n'); nl >= 0 {
-		rest = rest[:nl]
-	}
-	return rest
 }
 
 // readlinkFollow returns the final resolved target. We use EvalSymlinks

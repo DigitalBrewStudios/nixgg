@@ -16,6 +16,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/tbereknyei/nixgg/internal/drvref"
 	"github.com/tbereknyei/nixgg/internal/expr"
 	"github.com/tbereknyei/nixgg/internal/toolchain"
 )
@@ -97,29 +98,18 @@ func SubmitOutput(cfg *toolchain.Config, drvPath, outputName string) error {
 	return nil
 }
 
-// DrvRefHeader is the magic-string prefix written at the start of a
-// sandbox-mode output file. Downstream shims (classify.Target) read
-// this to recover the producing drv path.
-const DrvRefHeader = "#!nixgg-drvref\n"
-
-// PointOutputAtDrv writes a regular file at `output` whose content
-// identifies the producing drv. The sandbox-mode analogue of the
-// native mode's ".nix-thunk symlink" — but a real file, not a
-// symlink, because builder-rpc-v0 doesn't materialise the target
-// .drv into the sandbox filesystem (the daemon holds it), so a
-// symlink → /nix/store/…-….drv would dangle and fail `test -e` in
-// downstream Makefile prerequisite checks (e.g. mosh's
-// `mosh-client: ../crypto/libmoshcrypto.a`).
+// PointOutputAtDrv writes a drvref stub at `output`, recording which
+// drv produced the artifact that would otherwise live there. It is the
+// sandbox-mode analogue of native mode's .nix-thunk symlink.
 //
-// Format: magic header line + drv path + newline. The bang in the
-// magic makes it accidentally shellable ("cannot exec"), so if
-// something mis-invokes it as an executable, the error is obvious.
+// See internal/drvref for the format and for why it is a regular file
+// rather than a symlink.
 func PointOutputAtDrv(output, drvPath string) error {
 	if err := os.MkdirAll(filepath.Dir(output), 0o755); err != nil {
 		return err
 	}
 	_ = os.Remove(output)
-	body := DrvRefHeader + drvPath + "\n"
+	body := drvref.Body(drvPath)
 	if err := os.WriteFile(output, []byte(body), 0o644); err != nil {
 		return fmt.Errorf("write drvref %s -> %s: %w", output, drvPath, err)
 	}

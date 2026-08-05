@@ -6,6 +6,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/tbereknyei/nixgg/internal/drvref"
 )
 
 // TestParseLinkArgs pins the link-line parser: which tokens are inputs
@@ -128,7 +130,7 @@ func TestResolveLibFlagOnlyClaimsOurArtifacts(t *testing.T) {
 
 	// A drvref stub: what the archive shim writes in sandbox mode.
 	stub := filepath.Join(dir, "libours.a")
-	body := "#!nixgg-drvref\n/nix/store/" + strings.Repeat("a", 32) + "-ar-libours.a.drv\n"
+	body := drvref.Body("/nix/store/" + strings.Repeat("a", 32) + "-ar-libours.a.drv")
 	if err := os.WriteFile(stub, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -231,7 +233,7 @@ func TestParseLinkArgsSharedLibIsAnInput(t *testing.T) {
 func TestResolveLibFlagExactNameForm(t *testing.T) {
 	dir := t.TempDir()
 	stub := filepath.Join(dir, "libexact.a")
-	body := "#!nixgg-drvref\n/nix/store/" + strings.Repeat("a", 32) + "-ar-libexact.a.drv\n"
+	body := drvref.Body("/nix/store/" + strings.Repeat("a", 32) + "-ar-libexact.a.drv")
 	if err := os.WriteFile(stub, []byte(body), 0o644); err != nil {
 		t.Fatal(err)
 	}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/tbereknyei/nixgg/internal/classify"
 	"github.com/tbereknyei/nixgg/internal/dispatch"
+	"github.com/tbereknyei/nixgg/internal/drvref"
 	"github.com/tbereknyei/nixgg/internal/expr"
 	"github.com/tbereknyei/nixgg/internal/paths"
 	"github.com/tbereknyei/nixgg/internal/realise"
@@ -248,27 +249,13 @@ func resolveLibFlag(name string, libDirs []string) string {
 			// Sandbox mode: drvref stub is a small regular file with
 			// our magic header. Peek at the first byte cheaply.
 			if fi.Mode().IsRegular() && fi.Size() < 4096 {
-				if hasNixggDrvRef(cand) {
+				if drvref.Is(cand) {
 					return cand
 				}
 			}
 		}
 	}
 	return ""
-}
-
-// hasNixggDrvRef reports whether `path` starts with the drvref
-// magic header (sandbox.DrvRefHeader). Cheap peek so a stale
-// vendored .a doesn't get promoted.
-func hasNixggDrvRef(path string) bool {
-	f, err := os.Open(path)
-	if err != nil {
-		return false
-	}
-	defer f.Close()
-	buf := make([]byte, len("#!nixgg-drvref\n"))
-	n, _ := f.Read(buf)
-	return n == len(buf) && string(buf) == "#!nixgg-drvref\n"
 }
 
 // isLinkInput reports whether a token is a file the linker consumes,
