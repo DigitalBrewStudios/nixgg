@@ -1,8 +1,6 @@
 package expr
 
 import (
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -102,74 +100,6 @@ func TestNix32Encode(t *testing.T) {
 		if !isNix32Char(byte(c)) {
 			t.Fatalf("non-nix32 char %q in %q", c, got)
 		}
-	}
-}
-
-// TestShellQuoteFlagsMatchesNixHelper pins the byte-identity of Go's
-// shellQuoteFlags against nix/shell-quote-flags.nix, the helper that
-// nix/{builder,linker}.nix use to render the same Derivation.Flags in
-// native mode.
-//
-// This is the cheap guard for the invariant that tests/drv-equivalence.sh
-// enforces expensively: both modes must emit byte-identical drv scripts.
-// It runs the actual Nix helper via `nix-instantiate --eval --raw`
-// (~30ms, no daemon or store writes) rather than restating the expected
-// output in Go, so a one-sided edit to either implementation fails here.
-//
-// Regression origin: the three .nix builders did a bare `"'${f}'"` with
-// no escaping, while Go escaped `'` as `'\''`. A flag containing an
-// apostrophe (`-DMSG=it's` — easily reached by any -D carrying English
-// text) therefore produced valid script text in sandbox mode and
-// unparseable bash in native mode. No fixture in the pinned 81-drv set
-// happens to contain an apostrophe, so drv-equivalence.sh was blind to
-// it. Keep the apostrophe case below.
-func TestShellQuoteFlagsMatchesNixHelper(t *testing.T) {
-	if _, err := exec.LookPath("nix-instantiate"); err != nil {
-		t.Skip("nix-instantiate not on PATH")
-	}
-	helper, err := filepath.Abs("../../nix/shell-quote-flags.nix")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, tc := range []struct {
-		name  string
-		flags []string
-	}{
-		{"empty", nil},
-		{"plain", []string{"-O2", "-Wall"}},
-		{"apostrophe", []string{"-DMSG=it's"}},
-		{"apostrophe among others", []string{"-O2", "-DMSG=it's", "-Wall"}},
-		{"only apostrophe", []string{"'"}},
-		{"adjacent apostrophes", []string{"-DA=''"}},
-		{"backslash", []string{`-DPATH=a\b`}},
-		{"double quote", []string{`-DS="x"`}},
-		{"spaces in value", []string{"-DMSG=hello world"}},
-		{"dollar and backtick", []string{"-DX=$HOME`id`"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			got := shellQuoteFlags(tc.flags)
-
-			// Build the Nix list literal. Nix string escaping needs \" and
-			// \\ escaped; nothing else in our inputs is special inside "".
-			items := make([]string, 0, len(tc.flags))
-			for _, f := range tc.flags {
-				e := strings.ReplaceAll(f, `\`, `\\`)
-				e = strings.ReplaceAll(e, `"`, `\"`)
-				e = strings.ReplaceAll(e, "${", `\${`)
-				items = append(items, `"`+e+`"`)
-			}
-			expr := "import " + helper + " [ " + strings.Join(items, " ") + " ]"
-
-			out, err := exec.Command("nix-instantiate",
-				"--eval", "--raw", "--expr", expr).Output()
-			if err != nil {
-				t.Fatalf("nix-instantiate failed for %q: %v", expr, err)
-			}
-			if want := string(out); got != want {
-				t.Errorf("Go and Nix disagree — drv scripts would diverge\n"+
-					"flags: %q\ngo   : %q\nnix  : %q", tc.flags, got, want)
-			}
-		})
 	}
 }
 

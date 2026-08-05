@@ -39,11 +39,19 @@ nix build .#mosh        # mosh unstable — autoconf + protobuf + openssl/ncurse
 
 Both modes produce byte-identical `.drv` files. `nix build .#lua`
 gets an instant cache hit from an earlier native build in an
-extracted lua source tree, and vice versa. The equivalence is pinned
-by [tests/drv-equivalence.sh](tests/drv-equivalence.sh), which
-currently covers all four fixtures: `hello` (3 drvs), `lua` (37),
-`fmt` (3), `mosh` (38) — every drv matches byte-for-byte between the
-two modes.
+extracted lua source tree, and vice versa.
+
+That holds by construction rather than by discipline: the build
+command is rendered once, in Go, and sandbox mode bakes it into a
+JSON drv while native mode passes the same text through a thunk for
+`nix/resolve-script.nix` to fill in the few values only Nix knows at
+eval time. The two modes cannot disagree about flag quoting or
+argument order because there is only one place that decides either.
+
+The end-to-end equivalence is still pinned by
+[tests/drv-equivalence.sh](tests/drv-equivalence.sh), covering four
+fixtures: `hello` (3 drvs), `lua` (37), `fmt` (3), `mosh` (38) —
+every drv matching byte-for-byte between the two modes.
 
 ## Use it in your own project
 
