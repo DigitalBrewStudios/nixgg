@@ -270,32 +270,7 @@ func runScanner(cc, source string, flags []string) (*Result, []depEntry, error) 
 	// Sort headers by staging rel path so thunk content is stable.
 	sort.Slice(headers, func(i, j int) bool { return headers[i].Rel < headers[j].Rel })
 
-	// -I flags rewritten relative to the project root. Only the
-	// caller's own -I dirs are emitted; srcDir/cwd are only used to
-	// widen projectRoot (see projectRootHints above). Dedup so a
-	// caller's `-I.` (== cwd) and a repeat entry don't produce two
-	// -Iflags.
-	iflags := []string{"-I."}
-	seenRel := map[string]bool{".": true}
-	for _, p := range callerDirs {
-		var rel string
-		if p == projectRoot {
-			rel = "."
-		} else {
-			r, err := filepath.Rel(projectRoot, p)
-			if err != nil {
-				continue
-			}
-			rel = r
-		}
-		if seenRel[rel] {
-			continue
-		}
-		seenRel[rel] = true
-		if rel != "." {
-			iflags = append(iflags, "-I"+rel)
-		}
-	}
+	iflags := stagedIFlags(projectRoot, callerDirs)
 	// Store dirs pass through unchanged.
 	var storeFlags []string
 	for _, d := range storeDirs {
@@ -338,6 +313,49 @@ func runScanner(cc, source string, flags []string) (*Result, []depEntry, error) 
 		StoreIFlags:  storeFlags,
 		StagedIncludeFlags: includeFlags,
 	}, deps, nil
+}
+
+// stagedIFlags rewrites the caller's include dirs to be relative to the
+// staged project root, and is the sole producer of Result.StagedIFlags.
+//
+// Only `callerDirs` — dirs the caller actually passed via
+// -I/-isystem/-iquote/-idirafter — may become -I flags. cwd and the
+// source's own directory are deliberately NOT included: they are
+// projectRoot *hints* (see projectRootHints in runScanner) and nothing
+// more.
+//
+// Regression origin: those two lists used to be one. Compiling
+// ffmpeg's libavutil/parseutils.c from the ffmpeg root meant srcDir was
+// libavutil/, so it leaked out as a spurious `-Ilibavutil`. Inside the
+// drv (cwd = staged root) that resolved to $src/libavutil, whose own
+// time.h then shadowed glibc's <time.h> — because -I dirs are searched
+// before -isystem ones. Every TU reaching SmallVector-style code failed
+// with "'struct tm' has no member".
+//
+// "-I." is always first so the staged root is on the include path.
+// Results are deduped by rel path, so a caller's `-I.` (== cwd == root)
+// or a repeated dir does not emit twice.
+func stagedIFlags(projectRoot string, callerDirs []string) []string {
+	iflags := []string{"-I."}
+	seenRel := map[string]bool{".": true}
+	for _, p := range callerDirs {
+		rel := "."
+		if p != projectRoot {
+			r, err := filepath.Rel(projectRoot, p)
+			if err != nil {
+				continue
+			}
+			rel = r
+		}
+		if seenRel[rel] {
+			continue
+		}
+		seenRel[rel] = true
+		if rel != "." {
+			iflags = append(iflags, "-I"+rel)
+		}
+	}
+	return iflags
 }
 
 func statOr(abs string) depEntry {

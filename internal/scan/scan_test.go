@@ -1,6 +1,8 @@
 package scan
 
 import (
+	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -131,5 +133,143 @@ func TestResultCacheRoundTrip(t *testing.T) {
 		t.Errorf("Result has %d fields, round-trip test knows about %d — "+
 			"add the new field to encodeResult/decodeResult and to `want` above, "+
 			"then bump knownFields", n, knownFields)
+	}
+}
+
+// TestRunScannerDoesNotLeakSrcDirAsIFlag pins the ffmpeg regression at
+// its real call site: runScanner must pass only the CALLER's include
+// dirs to stagedIFlags, never projectRootHints.
+//
+// Regression origin: those were one list. Compiling
+// libavutil/parseutils.c from the ffmpeg root meant srcDir (libavutil/)
+// was in it, so it leaked out as a spurious `-Ilibavutil`. Inside the
+// drv (cwd = staged root) that resolved to $src/libavutil, whose own
+// time.h shadowed glibc's <time.h> — -I dirs are searched before
+// -isystem ones — leaving `struct tm` incomplete. Every TU that reached
+// it failed, and no ffmpeg fixture exists in drv-equivalence.sh, so
+// only a real ffmpeg build caught it.
+//
+// This drives runScanner with a fake `cc` that prints a canned -MM
+// fragment. Testing stagedIFlags alone does NOT catch this: the bug was
+// which list the caller hands it, not what it does with the list.
+func TestRunScannerDoesNotLeakSrcDirAsIFlag(t *testing.T) {
+	// Lay out the ffmpeg shape: root/ with a libavutil/ subdir.
+	root := t.TempDir()
+	sub := filepath.Join(root, "libavutil")
+	if err := os.MkdirAll(sub, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	src := filepath.Join(sub, "parseutils.c")
+	hdr := filepath.Join(sub, "parseutils.h")
+	for _, f := range []string{src, hdr} {
+		if err := os.WriteFile(f, []byte("/* x */\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	// Fake cc: emit a -MM fragment naming the one header, ignore argv.
+	fakeCC := filepath.Join(t.TempDir(), "fake-cc")
+	script := "#!/bin/sh\necho 'parseutils.o: libavutil/parseutils.h'\n"
+	if err := os.WriteFile(fakeCC, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	// Run from the ffmpeg root, as ffmpeg's make does.
+	prev, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chdir(prev)
+	if err := os.Chdir(root); err != nil {
+		t.Fatal(err)
+	}
+
+	// Caller passes `-I.` only — exactly what ffmpeg's CPPFLAGS does.
+	// srcDir is libavutil/, which must NOT become an -I flag.
+	r, _, err := runScanner(fakeCC, "libavutil/parseutils.c", []string{"-I."})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, f := range r.StagedIFlags {
+		if f == "-Ilibavutil" {
+			t.Errorf("srcDir leaked into StagedIFlags as %q — inside the drv this "+
+				"resolves to $src/libavutil and shadows system headers with the "+
+				"project's own (e.g. libavutil/time.h over glibc <time.h>).\n"+
+				"got StagedIFlags: %q", f, r.StagedIFlags)
+		}
+	}
+	if want := []string{"-I."}; !reflect.DeepEqual(r.StagedIFlags, want) {
+		t.Errorf("StagedIFlags = %q, want %q", r.StagedIFlags, want)
+	}
+}
+
+// TestStagedIFlags pins the rewriting itself, given a caller-dir list.
+func TestStagedIFlags(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		projectRoot string
+		callerDirs  []string
+		want        []string
+	}{
+		{"root only dedups to -I.", "/p", []string{"/p"}, []string{"-I."}},
+		{
+			"caller dirs become relative",
+			"/p", []string{"/p", "/p/inc", "/p/lib/sub"},
+			[]string{"-I.", "-Iinc", "-Ilib/sub"},
+		},
+		{
+			"repeats dedup",
+			"/p", []string{"/p", "/p", "/p/inc", "/p/inc"},
+			[]string{"-I.", "-Iinc"},
+		},
+		{"no caller dirs still yields -I.", "/p", nil, []string{"-I."}},
+		{
+			// Only reachable if projectRoot computation already went
+			// wrong; a visibly-broken flag beats a silently wrong one.
+			"dir outside root becomes ..-relative",
+			"/p/sub", []string{"/p/other"}, []string{"-I.", "-I../other"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := stagedIFlags(tc.projectRoot, tc.callerDirs)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("stagedIFlags(%q, %q)\n got: %q\nwant: %q",
+					tc.projectRoot, tc.callerDirs, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestCommonAncestor pins projectRoot selection. projectRoot decides
+// where every staged file lands (headers at <root>-relative paths), so a
+// wrong answer here either escapes the staging dir with `..` or widens
+// far enough to stage unrelated trees.
+func TestCommonAncestor(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		dirs []string
+		want string
+	}{
+		{"single dir is its own root", []string{"/p/a"}, "/p/a"},
+		{"siblings widen to parent", []string{"/p/a", "/p/b"}, "/p"},
+		{"nested keeps the ancestor", []string{"/p", "/p/a/b"}, "/p"},
+		{"order does not matter", []string{"/p/a/b", "/p"}, "/p"},
+		{"disjoint trees widen to /", []string{"/x/a", "/y/b"}, "/"},
+		{"empty input", nil, "/"},
+		{"trailing slashes are cleaned", []string{"/p/a/", "/p/a"}, "/p/a"},
+		{
+			// The ffmpeg case: cwd=root, srcDir=subdir. Root must stay
+			// the ffmpeg root, not narrow to libavutil.
+			"cwd plus srcDir subdir",
+			[]string{"/ff", "/ff/libavutil"},
+			"/ff",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := commonAncestor(tc.dirs); got != tc.want {
+				t.Errorf("commonAncestor(%q) = %q, want %q", tc.dirs, got, tc.want)
+			}
+		})
 	}
 }
