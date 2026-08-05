@@ -65,12 +65,17 @@ Flake packages currently exposed:
   (dynamic derivation). Built on top of `stdenv.mkDerivation`, so
   `buildInputs` / `nativeBuildInputs` / `propagatedBuildInputs` and
   standard setup hooks (cmake, autoreconf, pkg-config) Just Work.
-- `hello`, `lua`, `fmt`, `mosh` — concrete call sites of
-  `mkNixggBuild` you can build directly.
-- `hello-shell`, `lua-shell`, `fmt-shell`, `mosh-shell` — plain
-  `mkShell`s mirroring each example's stdenv env. `nix develop
-  .#<name>-shell` gives native mode the exact same buildInputs /
-  setup-hooks the sandbox has; used by `tests/drv-equivalence.sh`.
+- `hello`, `lua`, `fmt`, `mosh`, `redis`, `ffmpeg`, `two-phase`,
+  `llvm` — concrete call sites of `mkNixggBuild` you can build
+  directly. Driven from an `exampleDefs` table in flake.nix, so each
+  is one entry rather than three hand-written attrs.
+- `<name>-shell` for each of the above — plain `mkShell`s mirroring
+  that example's stdenv env. `nix develop .#<name>-shell` gives native
+  mode the exact same buildInputs / setup-hooks the sandbox has; used
+  by `tests/drv-equivalence.sh`.
+- `llvm-min-tblgen`, `llvm-tblgen`, `two-phase-codegen` — intermediate
+  phases, separately buildable so a phase chain can be smoke-tested one
+  step at a time.
 - `env-shell`, `patched-nix`, `nixgg-nix` (helper package),
   toolchain roots — supporting bits.
 
@@ -108,19 +113,23 @@ nixgg/
 │                               also exposes `.shell` (plain mkShell
 │                               mirroring the same stdenv env)
 ├── flake.nix / flake.lock      pinned nixpkgs; produces env-shell,
-│                               nixgg-bin, hello/lua/fmt/mosh (+ each
-│                               with a matching -shell), mkNixggBuild, …
+│                               nixgg-bin, an exampleDefs-driven set of
+│                               examples (+ a -shell each), mkNixggBuild, …
 ├── examples/                   out-of-tree examples driven from flake inputs
 │   ├── lua/default.nix         lua 5.4.7 — plain `make linux CC=cc`
 │   ├── fmt/default.nix         {fmt} 11.0.2 — cmake + ninja + libfmt.a
-│   └── mosh/default.nix        mosh — autoconf + protobuf + ncurses/openssl/zlib
+│   ├── mosh/default.nix        mosh — autoconf + protobuf + ncurses/openssl/zlib
+│   ├── redis/default.nix       redis 8.2.2 — plain Makefile, nested deps/
+│   ├── ffmpeg/default.nix      ffmpeg 7.1.2 — bespoke configure, ~1200 TUs
+│   ├── two-phase/              minimal phase-chain smoke test (codegen + app)
+│   └── llvm/default.nix        llvm 19.1.7 — 3-phase (tblgen ×2 → llc)
 ├── dyn-drv/                    dyn-drv exploration + test fixtures
 │   ├── NOTES.md                what we learned about builder-rpc-v0
 │   ├── config.nix              test helper
 │   ├── dyn-one-layer.nix       smallest dyn-drv chain (no sandbox)
 │   ├── dyn-json-drv.nix        working `nix derivation add` fixture
 │   ├── hello-mkbuild.nix       hello.cc via mkNixggBuild
-│   └── lua-mkbuild.nix         lua 5.4.7 via mkNixggBuild (legacy)
+│   └── nixgg-sandbox.nix       builder-rpc-v0 sandbox fixture
 ├── example/                    smoke-test Makefile (main.cc + util.cc)
 ├── tests/
 │   └── drv-equivalence.sh      native ↔ sandbox drv-hash regression test
@@ -134,6 +143,7 @@ nixgg/
     ├── wrapperenv/             capture NIX_CFLAGS_COMPILE etc into JSON
     ├── storedeps/              regex /nix/store/... refs from flags/env
     ├── classify/               resolve symlink → Store/Thunk/Drv/Regular/Absent
+    ├── drvref/                 sandbox-mode stub format (single definition)
     ├── expr/                   Nix expression + JSON drv emitters
     ├── thunk/                  hash + write .nix, symlink output
     ├── sandbox/                nix derivation add / store add / submit-output
