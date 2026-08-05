@@ -66,7 +66,7 @@ func (t Tool) Basename() string {
 //
 // Widening the INPUT side cannot change derivation content: every
 // accepted spelling maps onto one of the six roles, and Tool.Basename()
-// — which is what lands in the drv as toolBasename — returns one of the
+// — which is what the drv's compile command invokes — returns one of the
 // same six canonical strings it always did. `gcc-15` is dispatched as
 // ToolGCC and the drv still says "gcc", so the sandbox resolves the
 // pinned compiler rather than the caller's versioned one. That is

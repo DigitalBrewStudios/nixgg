@@ -5,14 +5,20 @@
 # .../foo.nix`) or a `pureStorePath` result (realise mode: already in
 # the store). Either way, `${item.drv}/${item.name}` interpolates to
 # the linker CLI.
+#
+# The link command itself comes from Go — see resolve-script.nix. That
+# includes the `-l`-after-inputs ordering that ffmpeg needed: this file
+# used to reimplement that split, and sandbox mode implemented it
+# separately, which is precisely the kind of duplication that produced
+# divergent drv hashes.
 {
   compilerRoot  ? (import ./toolchain.nix).compilerRoot,
   bashRoot      ? (import ./toolchain.nix).bashRoot,
   coreutilsRoot ? (import ./toolchain.nix).coreutilsRoot,
-  toolBasename,
   outName,
   inputs,
-  flagsJSON,
+  scriptTemplate,
+  markerTag,
   storeDepsJSON ? "[]",
   wrapperEnvJSON ? "{}",
 }:
@@ -21,29 +27,11 @@ let
   bash        = pureStorePath bashRoot;
   coreutils   = pureStorePath coreutilsRoot;
   compiler    = pureStorePath compilerRoot;
-  flags       = builtins.fromJSON flagsJSON;
   storeDeps   = map pureStorePath (builtins.fromJSON storeDepsJSON);
   wrapperEnv  = builtins.fromJSON wrapperEnvJSON;
-
-  # Split `-l<name>` out of flags so they can be emitted AFTER
-  # objects/archives on the link line. Classic single-pass ld
-  # resolves libraries against objects mentioned *before* them; if
-  # `-lm` appears before ffmpeg's libavutil.a we get "undefined
-  # reference to sqrt". Preserve intra-group order so `-Wl,--as-needed`
-  # and its ilk still apply.
-  isLFlag = f: builtins.substring 0 2 f == "-l" && builtins.stringLength f > 2;
-  lflags     = builtins.filter isLFlag flags;
-  nonLflags  = builtins.filter (f: !(isLFlag f)) flags;
-  quotedNonL = import ./shell-quote-flags.nix nonLflags;
-  quotedL    = import ./shell-quote-flags.nix lflags;
-  # When there are no -l flags, keep the historical layout (no
-  # trailing empty slot in the shell command) so pre-existing drv
-  # hashes stay stable.
-  tailArgs = if lflags == [] then "" else " " + quotedL;
-
-  objArgs = builtins.concatStringsSep " " (map
-    (i: "'${i.drv}/${i.name}'")
-    inputs);
+  script      = import ./resolve-script.nix {
+    inherit scriptTemplate markerTag coreutils compiler inputs;
+  };
 in
 derivation ({
   name = "bin-${outName}";
@@ -54,15 +42,7 @@ derivation ({
   outputHashAlgo = "sha256";
 
   builder = "${bash}/bin/bash";
-  args = [
-    "-c"
-    ''
-      set -euo pipefail
-      export PATH="${coreutils}/bin:${compiler}/bin"
-      mkdir -p "$out"
-      "${toolBasename}" ${quotedNonL} ${objArgs}${tailArgs} -o "$out/${outName}"
-    ''
-  ];
+  args = [ "-c" script ];
 
   _storeDeps = builtins.concatStringsSep ":" storeDeps;
 } // wrapperEnv)

@@ -1,13 +1,21 @@
 # Archive CA derivation.
 #
 # `inputs` is a native Nix list of { drv, name }. Same shape as linker.nix.
+#
+# The `ar` command comes from Go — see resolve-script.nix.
+#
+# Note `compilerRoot` here is whatever provides `ar` (binutils), not a
+# compiler. The name is historical: it is the third positional toolchain
+# root every helper takes, and this one puts it on PATH for `ar`. Go's
+# side of the same value is the Derivation.AR field.
 {
   compilerRoot  ? (import ./toolchain.nix).compilerRoot,
   bashRoot      ? (import ./toolchain.nix).bashRoot,
   coreutilsRoot ? (import ./toolchain.nix).coreutilsRoot,
   outName,
   inputs,
-  arFlags ? "cru",
+  scriptTemplate,
+  markerTag,
   storeDepsJSON ? "[]",
   wrapperEnvJSON ? "{}",
 }:
@@ -18,10 +26,9 @@ let
   compiler    = pureStorePath compilerRoot;
   storeDeps   = map pureStorePath (builtins.fromJSON storeDepsJSON);
   wrapperEnv  = builtins.fromJSON wrapperEnvJSON;
-
-  objArgs = builtins.concatStringsSep " " (map
-    (i: "'${i.drv}/${i.name}'")
-    inputs);
+  script      = import ./resolve-script.nix {
+    inherit scriptTemplate markerTag coreutils compiler inputs;
+  };
 in
 derivation ({
   name = "ar-${outName}";
@@ -32,15 +39,7 @@ derivation ({
   outputHashAlgo = "sha256";
 
   builder = "${bash}/bin/bash";
-  args = [
-    "-c"
-    ''
-      set -euo pipefail
-      export PATH="${coreutils}/bin:${compiler}/bin"
-      mkdir -p "$out"
-      ar D${arFlags} "$out/${outName}" ${objArgs}
-    ''
-  ];
+  args = [ "-c" script ];
 
   _storeDeps = builtins.concatStringsSep ":" storeDeps;
 } // wrapperEnv)

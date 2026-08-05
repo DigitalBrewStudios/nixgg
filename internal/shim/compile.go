@@ -47,7 +47,7 @@ func realToolFor(cfg *toolchain.Config, tool dispatch.Tool) string {
 // stages source + headers, writes a thunk, and symlinks the output.
 //
 // tool is the caller's argv[0] role (cc / gcc / c++ / g++) — that name
-// is what gets baked into the derivation's toolBasename, so
+// is what gets baked into the derivation's compile command, so
 // `cc -c foo.c` produces a "cc" invocation inside the sandbox, not g++.
 func Compile(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layout) error {
 	// Passthrough targets the sibling binary matching argv[0]:

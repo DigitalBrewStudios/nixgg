@@ -12,7 +12,6 @@ package expr
 import (
 	"crypto/sha256"
 	"encoding/json"
-	"fmt"
 	"sort"
 	"strings"
 )
@@ -165,33 +164,6 @@ type Input struct {
 	// Name is the basename that will appear inside the derivation
 	// output — same as the caller-visible symlink's basename.
 	Name string
-}
-
-// InputsList renders `inputs = [ ... ];` value for a linker/archiver
-// expression. Each entry is `{ drv = <expr>; name = "<n>"; }`.
-func InputsList(inputs []Input) string {
-	if len(inputs) == 0 {
-		return "[ ]"
-	}
-	var b strings.Builder
-	b.WriteString("[ ")
-	for _, in := range inputs {
-		var drv string
-		switch in.Kind {
-		case "store":
-			drv = fmt.Sprintf("builtins.storePath %q", in.Ref)
-		case "nix":
-			// Absolute Nix path literal (unquoted): survives `cp` of the
-			// containing thunk to a peer directory. See Input.Ref docstring.
-			drv = "import " + in.Ref
-		default:
-			// Shouldn't happen; be visible if it does.
-			drv = fmt.Sprintf("/* unknown ref_kind: %s */ null", in.Kind)
-		}
-		fmt.Fprintf(&b, "{ drv = %s; name = %q; } ", drv, in.Name)
-	}
-	b.WriteString("]")
-	return b.String()
 }
 
 // jsonArrayIndented renders a []string as a pretty JSON array. This is

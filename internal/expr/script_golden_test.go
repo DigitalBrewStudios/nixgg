@@ -11,37 +11,42 @@ import (
 
 // The drv-script golden test.
 //
-// nixgg emits the SAME derivation two ways: Go's Derivation.script()
-// bakes the bash body straight into a JSON drv (sandbox mode), while
-// nix/{builder,linker,archiver}.nix re-derive that body from the thunk's
-// arguments at eval time (native mode). Nothing in the type system ties
-// the two together — they are byte-identical only because someone kept
-// them that way by hand. When they drift, native and sandbox produce
-// different drv hashes for the same compile, which is the one invariant
-// this project rests on.
+// Both modes get their shell body from ONE place — Go's
+// Derivation.buildScript. Sandbox mode renders it with every store path
+// resolved; native mode renders the same layout with @NIXGG_*@ markers
+// and nix/resolve-script.nix substitutes the values Nix only knows at
+// eval time. These tests pin the seam between those two renderings.
 //
-// tests/drv-equivalence.sh already catches drift, but it costs minutes,
-// needs the patched Nix plus an alt store, and only covers flag/input
-// shapes that the four pinned fixtures happen to contain. That blind
-// spot is not hypothetical: it is exactly how the `'` quoting divergence
-// (fixed in 6aa52c7) survived — 81 pinned drvs and not one apostrophe
-// among them.
+// What can still go wrong, and what each test below catches:
 //
-// These tests close it at the unit level. Each one renders a Derivation
-// through Go, renders the same arguments through the real .nix helper via
-// `nix-instantiate --eval --raw` (pure eval, ~30ms, no daemon, no store
-// writes, reading `drvAttrs.args` rather than instantiating), and demands
-// the two strings match byte for byte. The cases deliberately include
-// shapes no fixture exercises — apostrophes, spaces, backslashes, empty
-// flag lists, `-l` splitting on both sides of its fallback branch.
+//   - The marker contract desynchronises: Go renames a marker, or
+//     resolve-script.nix substitutes a different set. The template would
+//     then reach bash with a literal `@NIXGG_INPUT0@` in argv.
+//     → TestNativeTemplateResolvesToSandboxScript runs the real helper
+//       and demands the result equal script() byte for byte.
 //
-// If you change the shell layout in script(), this fails until you make
-// the matching .nix edit, and vice versa. That is the entire point: it
-// converts "identical by discipline" into "identical by test".
+//   - The template is not a valid Nix string literal. Flags carrying a
+//     doubled apostrophe or `${` would produce a thunk that fails to
+//     parse, or worse, silently interpolates at eval time.
+//     → TestScriptTemplateSurvivesNixParsing.
 //
-// Related but narrower: TestShellQuoteFlagsMatchesNixHelper pins just
-// the quoting function. This pins the whole assembled script, so it also
-// covers PATH construction, input rendering, and argument order.
+//   - Layout regressions in the shared code: `-l` ordering, the
+//     lflags==[] fallback that 78 pinned hashes depend on, the trailing
+//     newline.
+//     → TestLinkScriptEmitsLibFlagsAfterInputs (in expr_test.go),
+//       TestScriptEndsWithNewline.
+//
+// The tests that used to live here compared Go's script() against a
+// second, independent implementation inside each .nix helper. That
+// duplication is what this commit deleted, so those comparisons no
+// longer have two sides to compare — they are replaced by the
+// resolves-to test, which is strictly stronger: it proves the native
+// path produces the sandbox bytes rather than proving two hand-synced
+// implementations happen to agree today.
+//
+// Everything runs through `nix-instantiate --eval --raw` reading
+// `drvAttrs.args` — pure eval, ~1s total, no daemon and no store writes.
+// End-to-end drv-hash equality is still tests/drv-equivalence.sh's job.
 
 // nixEvalScript renders `helper` with `args` and returns args[1] of the
 // resulting derivation — the bash body. helper is a basename in nix/.
@@ -133,188 +138,6 @@ func toolchainArgsNix(compilerOrAR string) string {
 	return "  bashRoot      = " + nixStr(fakeBash) + ";\n" +
 		"  coreutilsRoot = " + nixStr(fakeCoreutils) + ";\n" +
 		"  compilerRoot  = " + nixStr(compilerOrAR) + ";\n"
-}
-
-// TestCompileScriptMatchesBuilderNix pins Go's KindCompile script
-// against nix/builder.nix.
-//
-// The srcTree argument is a real directory (Nix imports it at eval time)
-// but the compile script never interpolates it — it goes through the
-// `$src` env var — so the store path it lands on cannot affect the
-// comparison. That indirection is deliberate; see script()'s docstring.
-func TestCompileScriptMatchesBuilderNix(t *testing.T) {
-	requireNixInstantiate(t)
-
-	// A source tree for srcTree to import. Contents are irrelevant.
-	srcTree := t.TempDir()
-	if err := os.WriteFile(filepath.Join(srcTree, "main.c"), []byte("int main(){}\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-
-	for _, tc := range []struct {
-		name  string
-		tool  string
-		src   string
-		out   string
-		flags []string
-	}{
-		{"no flags", "cc", "main.c", "main.o", nil},
-		{"plain flags", "gcc", "main.c", "main.o", []string{"-O2", "-Wall"}},
-		{"cxx tool", "g++", "src/util.cc", "util.o", []string{"-std=c++17"}},
-		// Shapes absent from all four pinned fixtures — the blind spot
-		// that let the quoting bug through.
-		{"apostrophe in define", "cc", "main.c", "main.o", []string{"-DMSG=it's"}},
-		{"space in define", "cc", "main.c", "main.o", []string{"-DMSG=hello world"}},
-		{"backslash in define", "cc", "main.c", "main.o", []string{`-DP=a\b`}},
-		{"double quote in define", "cc", "main.c", "main.o", []string{`-DS="x"`}},
-		{"dollar and backtick", "cc", "main.c", "main.o", []string{"-DX=$HOME`id`"}},
-		{"nix interpolation lookalike", "cc", "main.c", "main.o", []string{"-DX=${notNix}"}},
-		{"output name with dots", "cc", "a.b.c", "a.b.o", []string{"-O1"}},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			d := &Derivation{
-				Kind:      KindCompile,
-				Tool:      tc.tool,
-				Coreutils: fakeCoreutils,
-				Compiler:  fakeCompiler,
-				Bash:      fakeBash,
-				SrcStore:  "/irrelevant", // never appears in the script
-				Source:    tc.src,
-				OutName:   tc.out,
-				Flags:     tc.flags,
-			}
-			args := "{\n" + toolchainArgsNix(fakeCompiler) +
-				"  toolBasename = " + nixStr(tc.tool) + ";\n" +
-				"  srcTree      = " + srcTree + ";\n" +
-				"  source       = " + nixStr(tc.src) + ";\n" +
-				"  outName      = " + nixStr(tc.out) + ";\n" +
-				"  flagsJSON    = " + flagsJSONOf(t, tc.flags) + ";\n}"
-			assertSameScript(t, d.script(), nixEvalScript(t, "builder.nix", args))
-		})
-	}
-}
-
-// TestLinkScriptMatchesLinkerNix pins Go's KindLink script against
-// nix/linker.nix, including the `-l`-after-inputs split and its
-// len(lflags)==0 fallback. Both branches are covered because the
-// fallback is what keeps 78 pinned drv hashes stable — a change that
-// merged the branches would look harmless here and shift every hash.
-func TestLinkScriptMatchesLinkerNix(t *testing.T) {
-	requireNixInstantiate(t)
-
-	twoInputs := []derivInput{
-		{InputKind: "store", Ref: fakeObj, Name: "main.o"},
-		{InputKind: "store", Ref: fakeArchive, Name: "libx.a"},
-	}
-	twoInputsNix := "[\n" +
-		"    { drv = ps " + nixStr(fakeObj) + "; name = \"main.o\"; }\n" +
-		"    { drv = ps " + nixStr(fakeArchive) + "; name = \"libx.a\"; }\n" +
-		"  ]"
-
-	for _, tc := range []struct {
-		name      string
-		tool      string
-		out       string
-		flags     []string
-		inputs    []derivInput
-		inputsNix string
-	}{
-		{"no flags no -l", "cc", "prog", nil, twoInputs, twoInputsNix},
-		{"flags but no -l (fallback branch)", "c++", "prog",
-			[]string{"-O2", "-Wl,-E"}, twoInputs, twoInputsNix},
-		{"one -l (split branch)", "cc", "prog",
-			[]string{"-O2", "-lm"}, twoInputs, twoInputsNix},
-		{"several -l interleaved", "cc", "prog",
-			[]string{"-lm", "-O2", "-ldl", "-Wl,--as-needed", "-lpthread"}, twoInputs, twoInputsNix},
-		// `-l` alone is not a library flag (len > 2 guard). Both
-		// implementations must agree on that or the split desynchronises.
-		{"bare -l is not a lib flag", "cc", "prog",
-			[]string{"-l", "-O2"}, twoInputs, twoInputsNix},
-		{"only -l flags", "cc", "prog",
-			[]string{"-lm", "-lc"}, twoInputs, twoInputsNix},
-		{"no inputs", "cc", "prog", []string{"-O2"}, nil, "[ ]"},
-		{"apostrophe in flag", "cc", "prog",
-			[]string{"-DMSG=it's"}, twoInputs, twoInputsNix},
-		{"apostrophe and -l together", "cc", "prog",
-			[]string{"-DMSG=it's", "-lm"}, twoInputs, twoInputsNix},
-		{"-l with exact-name form", "cc", "prog",
-			[]string{"-l:libfoo.a"}, twoInputs, twoInputsNix},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			d := &Derivation{
-				Kind:      KindLink,
-				Tool:      tc.tool,
-				Coreutils: fakeCoreutils,
-				Compiler:  fakeCompiler,
-				Bash:      fakeBash,
-				OutName:   tc.out,
-				Flags:     tc.flags,
-				Inputs:    tc.inputs,
-			}
-			args := "{\n" + toolchainArgsNix(fakeCompiler) +
-				"  toolBasename = " + nixStr(tc.tool) + ";\n" +
-				"  outName      = " + nixStr(tc.out) + ";\n" +
-				"  inputs       = " + tc.inputsNix + ";\n" +
-				"  flagsJSON    = " + flagsJSONOf(t, tc.flags) + ";\n}"
-			assertSameScript(t, d.script(), nixEvalScriptWithPS(t, "linker.nix", args))
-		})
-	}
-}
-
-// TestArchiveScriptMatchesArchiverNix pins Go's KindArchive script
-// against nix/archiver.nix.
-//
-// Note the PATH asymmetry this locks in: archiver.nix puts
-// `compilerRoot` on PATH, and Go's KindArchive puts d.AR there. They
-// agree only because the sandbox caller passes the binutils root as AR
-// while the native caller passes it as compilerRoot. The test passes the
-// same path to both, which is what production does — but it is worth
-// knowing that these two fields mean "whatever provides ar" and not what
-// their names suggest.
-func TestArchiveScriptMatchesArchiverNix(t *testing.T) {
-	requireNixInstantiate(t)
-
-	twoInputs := []derivInput{
-		{InputKind: "store", Ref: fakeObj, Name: "main.o"},
-		{InputKind: "store", Ref: fakeArchive, Name: "libx.a"},
-	}
-	twoInputsNix := "[\n" +
-		"    { drv = ps " + nixStr(fakeObj) + "; name = \"main.o\"; }\n" +
-		"    { drv = ps " + nixStr(fakeArchive) + "; name = \"libx.a\"; }\n" +
-		"  ]"
-
-	for _, tc := range []struct {
-		name      string
-		out       string
-		arFlags   string
-		inputs    []derivInput
-		inputsNix string
-	}{
-		{"rcs", "libfoo.a", "rcs", twoInputs, twoInputsNix},
-		{"cru (the helper default)", "libfoo.a", "cru", twoInputs, twoInputsNix},
-		{"no inputs", "libempty.a", "rcs", nil, "[ ]"},
-		{"single input", "libone.a", "rcs", twoInputs[:1],
-			"[\n    { drv = ps " + nixStr(fakeObj) + "; name = \"main.o\"; }\n  ]"},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			d := &Derivation{
-				Kind:      KindArchive,
-				Coreutils: fakeCoreutils,
-				Bash:      fakeBash,
-				// Native's archiver.nix reads compilerRoot for the ar dir;
-				// Go reads AR. Same path either way — see the docstring.
-				AR:      fakeAR,
-				OutName: tc.out,
-				ARFlags: tc.arFlags,
-				Inputs:  tc.inputs,
-			}
-			args := "{\n" + toolchainArgsNix(fakeAR) +
-				"  outName = " + nixStr(tc.out) + ";\n" +
-				"  inputs  = " + tc.inputsNix + ";\n" +
-				"  arFlags = " + nixStr(tc.arFlags) + ";\n}"
-			assertSameScript(t, d.script(), nixEvalScriptWithPS(t, "archiver.nix", args))
-		})
-	}
 }
 
 // TestDrvRefInputsRenderIdentically pins the "nix"-kind input path: an
@@ -432,4 +255,239 @@ func assertSameScript(t *testing.T, goScript, nixScript string) {
 			t.Errorf("  line %d differs:\n    go : %q\n    nix: %q", i+1, g, n)
 		}
 	}
+}
+
+// TestNativeTemplateResolvesToSandboxScript is the core guard for the
+// unified serializer.
+//
+// script() and scriptTemplate() come from the same buildScript call, so
+// the layout cannot diverge — but the template still has to survive a
+// round trip through Nix. This test runs the REAL nix/resolve-script.nix
+// with the same store paths and inputs the sandbox side used, and demands
+// the resolved text equal script() byte for byte.
+//
+// That is what makes the marker contract enforceable. If Go renames a
+// marker, adds an input marker the helper does not substitute, or the
+// helper's replaceStrings lists fall out of order, the template reaches
+// bash with a literal `@NIXGG_INPUT0@` in argv — a build failure whose
+// cause is nowhere near its symptom. Here it is a one-line diff.
+//
+// Only "store"-kind inputs are used. A "nix"-kind input is a sibling drv
+// whose placeholder Go computes and Nix derives while instantiating; the
+// two agree (verified by TestCAOutputPlaceholder against a captured
+// vector, and end to end by drv-equivalence.sh), but reproducing it here
+// would mean instantiating a real sibling derivation, which needs a
+// writable store. TestDrvRefInputsRenderIdentically covers the layout of
+// that case instead.
+func TestNativeTemplateResolvesToSandboxScript(t *testing.T) {
+	requireNixInstantiate(t)
+
+	twoInputs := []derivInput{
+		{InputKind: "store", Ref: fakeObj, Name: "main.o"},
+		{InputKind: "store", Ref: fakeArchive, Name: "libx.a"},
+	}
+	// Two inputs sharing one store path: pins that markers are positional,
+	// not content-derived. A content-keyed scheme would collapse these.
+	dupInputs := []derivInput{
+		{InputKind: "store", Ref: fakeObj, Name: "a.o"},
+		{InputKind: "store", Ref: fakeObj, Name: "b.o"},
+	}
+
+	for _, tc := range []struct {
+		name string
+		d    *Derivation
+	}{
+		{"compile, no flags", &Derivation{
+			Kind: KindCompile, Tool: "cc", Source: "main.c", OutName: "main.o"}},
+		{"compile, plain flags", &Derivation{
+			Kind: KindCompile, Tool: "gcc", Source: "main.c", OutName: "main.o",
+			Flags: []string{"-O2", "-Wall"}}},
+		// Shapes no pinned fixture contains — the blind spot that let the
+		// `'` quoting divergence through 81 drvs.
+		{"compile, apostrophe", &Derivation{
+			Kind: KindCompile, Tool: "cc", Source: "main.c", OutName: "main.o",
+			Flags: []string{"-DMSG=it's"}}},
+		{"compile, doubled apostrophe", &Derivation{
+			Kind: KindCompile, Tool: "cc", Source: "main.c", OutName: "main.o",
+			Flags: []string{"-DA=''"}}},
+		{"compile, nix interpolation lookalike", &Derivation{
+			Kind: KindCompile, Tool: "cc", Source: "main.c", OutName: "main.o",
+			Flags: []string{"-DX=${HOME}"}}},
+		{"compile, backslash and quotes", &Derivation{
+			Kind: KindCompile, Tool: "cc", Source: "main.c", OutName: "main.o",
+			Flags: []string{`-DP=a\b`, `-DS="x"`, "-DY=$HOME`id`"}}},
+		{"compile, literal at-sign", &Derivation{
+			Kind: KindCompile, Tool: "cc", Source: "main.c", OutName: "main.o",
+			Flags: []string{"-DAT=@NIXGG_COMPILER@"}}},
+
+		{"link, no -l (fallback branch)", &Derivation{
+			Kind: KindLink, Tool: "c++", OutName: "prog",
+			Flags: []string{"-O2", "-Wl,-E"}, Inputs: twoInputs}},
+		{"link, with -l (split branch)", &Derivation{
+			Kind: KindLink, Tool: "cc", OutName: "prog",
+			Flags: []string{"-O2", "-lm", "-ldl"}, Inputs: twoInputs}},
+		{"link, no flags no inputs", &Derivation{
+			Kind: KindLink, Tool: "cc", OutName: "prog"}},
+		{"link, duplicate input paths", &Derivation{
+			Kind: KindLink, Tool: "cc", OutName: "prog",
+			Flags: []string{"-O2"}, Inputs: dupInputs}},
+		{"link, apostrophe and -l", &Derivation{
+			Kind: KindLink, Tool: "cc", OutName: "prog",
+			Flags: []string{"-DMSG=it's", "-lm"}, Inputs: twoInputs}},
+
+		{"archive, rcs", &Derivation{
+			Kind: KindArchive, OutName: "libfoo.a", ARFlags: "rcs", Inputs: twoInputs}},
+		{"archive, no inputs", &Derivation{
+			Kind: KindArchive, OutName: "libempty.a", ARFlags: "rcs"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := tc.d
+			d.Coreutils = fakeCoreutils
+			d.Bash = fakeBash
+			if d.Kind == KindArchive {
+				d.AR = fakeAR
+			} else {
+				d.Compiler = fakeCompiler
+			}
+
+			// The helper renders `${i.drv}/${i.name}`, so pass the store
+			// root as drv and let it append the name — same as production.
+			items := make([]string, 0, len(d.Inputs))
+			for _, in := range d.Inputs {
+				items = append(items,
+					"{ drv = ps "+nixStr(in.Ref)+"; name = "+nixStr(in.Name)+"; }")
+			}
+			tmpl, tag := d.scriptTemplate()
+			expr := "let ps = import " + nixHelperPath(t, "pure-store-path.nix") + "; in " +
+				"import " + nixHelperPath(t, "resolve-script.nix") + " {\n" +
+				"  scriptTemplate = " + nixIndentedStringLiteral(tmpl) + ";\n" +
+				"  markerTag = " + nixStr(tag) + ";\n" +
+				"  coreutils = ps " + nixStr(fakeCoreutils) + ";\n" +
+				"  compiler  = ps " + nixStr(d.compilerOrAR()) + ";\n" +
+				"  inputs = [ " + strings.Join(items, " ") + " ];\n" +
+				"}"
+
+			resolved := runNixEval(t, expr)
+			assertSameScript(t, d.script(), resolved)
+
+			// No marker of the chosen tag may survive resolution.
+			if strings.Contains(resolved, "@"+tag+"_") {
+				t.Errorf("unresolved @%s_ marker reached the final script — bash "+
+					"would receive it as a literal argument:\n%s", tag, resolved)
+			}
+		})
+	}
+}
+
+// TestScriptTemplateSurvivesNixParsing pins that the template Go writes
+// into a thunk is a well-formed Nix indented-string literal whose value
+// is the template unchanged.
+//
+// Two constructs are special inside that literal and both are reachable
+// from ordinary flags: a doubled apostrophe closes the string, and `${`
+// opens an interpolation. Unescaped, the first yields a thunk that will
+// not parse and the second one that silently interpolates at eval time —
+// or fails with "undefined variable", which at least is loud.
+func TestScriptTemplateSurvivesNixParsing(t *testing.T) {
+	requireNixInstantiate(t)
+
+	for _, tc := range []struct {
+		name  string
+		flags []string
+	}{
+		{"plain", []string{"-O2"}},
+		{"single apostrophe", []string{"-DMSG=it's"}},
+		{"doubled apostrophe", []string{"-DA=''"}},
+		{"tripled apostrophe", []string{"-DA='''"}},
+		{"interpolation open", []string{"-DX=${HOME}"}},
+		{"interpolation open, no close", []string{"-DX=${"}},
+		{"both hazards", []string{"-DA=''", "-DX=${HOME}"}},
+		{"backslash before apostrophe", []string{`-DA=\'`}},
+		{"dollar alone", []string{"-DX=$"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &Derivation{
+				Kind: KindCompile, Tool: "cc", Coreutils: fakeCoreutils,
+				Compiler: fakeCompiler, Source: "main.c", OutName: "main.o",
+				Flags: tc.flags,
+			}
+			want, _ := d.scriptTemplate()
+			got := runNixEval(t, nixIndentedStringLiteral(want))
+			if got != want {
+				t.Errorf("template did not round-trip through Nix parsing\n"+
+					"flags: %q\nwant: %q\ngot : %q", tc.flags, want, got)
+			}
+		})
+	}
+}
+
+// nixHelperPath returns the absolute path of a helper in nix/.
+func nixHelperPath(t *testing.T, name string) string {
+	t.Helper()
+	dir, err := filepath.Abs("../../nix")
+	if err != nil {
+		t.Fatal(err)
+	}
+	return filepath.Join(dir, name)
+}
+
+// TestMarkerTagAvoidsCollisionWithFlagText pins the escape hatch that
+// makes marker substitution safe against adversarial flag text.
+//
+// Markers are plain text in a shell script, so a flag spelling one would
+// be substituted along with the real markers: `-DAT=@NIXGG_COMPILER@`
+// would reach the compiler as `-DAT=/nix/store/…-gcc-wrapper`. Contrived,
+// yes — and so was an apostrophe in a -D, right up until it broke native
+// mode. This is caught by TestNativeTemplateResolvesToSandboxScript with
+// a fixed tag; the point here is that the fallback actually engages and
+// stays deterministic.
+func TestMarkerTagAvoidsCollisionWithFlagText(t *testing.T) {
+	mk := func(flags ...string) *Derivation {
+		return &Derivation{
+			Kind: KindCompile, Tool: "cc", Coreutils: fakeCoreutils,
+			Compiler: fakeCompiler, Source: "main.c", OutName: "main.o",
+			Flags: flags,
+		}
+	}
+
+	t.Run("ordinary flags get the base tag", func(t *testing.T) {
+		if _, tag := mk("-O2").scriptTemplate(); tag != "NIXGG" {
+			t.Errorf("tag = %q, want the base tag for a body with no markers", tag)
+		}
+	})
+
+	t.Run("a flag spelling a marker forces a different tag", func(t *testing.T) {
+		tmpl, tag := mk("-DAT=@NIXGG_COMPILER@").scriptTemplate()
+		if tag == "NIXGG" {
+			t.Fatal("tag did not move away from a colliding flag; the flag text " +
+				"would be substituted as if it were a marker")
+		}
+		// The flag's own text must still be present, unsubstituted.
+		if !strings.Contains(tmpl, "-DAT=@NIXGG_COMPILER@") {
+			t.Errorf("flag text lost from template:\n%s", tmpl)
+		}
+		// And the real markers must use the new tag.
+		if !strings.Contains(tmpl, "@"+tag+"_COMPILER@") {
+			t.Errorf("template has no @%s_COMPILER@ marker:\n%s", tag, tmpl)
+		}
+	})
+
+	t.Run("escalates past several occupied tags", func(t *testing.T) {
+		_, tag := mk(
+			"-DA=@NIXGG_X@", "-DB=@NIXGG1_X@", "-DC=@NIXGG2_X@",
+		).scriptTemplate()
+		if tag == "NIXGG" || tag == "NIXGG1" || tag == "NIXGG2" {
+			t.Errorf("tag %q collides with flag text", tag)
+		}
+	})
+
+	t.Run("deterministic", func(t *testing.T) {
+		// The tag lands in the thunk text and therefore in its hash, so a
+		// second call on equal input must produce the same tag.
+		_, a := mk("-DAT=@NIXGG_COMPILER@").scriptTemplate()
+		_, b := mk("-DAT=@NIXGG_COMPILER@").scriptTemplate()
+		if a != b {
+			t.Errorf("tag not deterministic: %q then %q — thunk hashes would be unstable", a, b)
+		}
+	})
 }

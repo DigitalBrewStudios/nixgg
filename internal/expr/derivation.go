@@ -16,6 +16,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 )
 
@@ -110,19 +111,119 @@ type derivInput struct {
 // output; caching for one call site is fine.
 func outputPlaceholder() string { return "/" + OutPlaceholderNix32 }
 
-// script returns the bash `-c` body the derivation runs. Byte-
-// identical between native (interpreted by builder.nix's own args)
-// and JSON (baked directly into the drv's args) — that's what makes
-// their drv hashes match.
+// Native mode's script text carries markers in place of values only Nix
+// can supply at eval time.
 //
-// All variants use env-var indirection ($src, $source, $outName)
-// where possible: the shell script's byte content shouldn't depend
-// on the concrete store paths, only on tool/flags/output layout.
-func (d *Derivation) script() string {
-	pathPrefix := fmt.Sprintf(`export PATH="%s/bin:%s/bin"`, d.Coreutils, d.Compiler)
-	if d.Kind == KindArchive {
-		pathPrefix = fmt.Sprintf(`export PATH="%s/bin:%s/bin"`, d.Coreutils, d.AR)
+// Sandbox mode has every store path in hand when it builds the script, so
+// it renders them directly. Native mode does not: an input can be an
+// unrealised sibling thunk whose drv hash — and therefore whose CA output
+// placeholder — does not exist until Nix instantiates it. The toolchain
+// roots are likewise the helper's own arguments.
+//
+// So buildScript emits the full shell layout either way, and native mode
+// leaves markers for nix/resolve-script.nix to fill in with a single
+// `builtins.replaceStrings`. Store context survives that substitution,
+// which is what keeps the drv's dependency edges intact — verified end to
+// end by tests/drv-equivalence.sh.
+//
+// # Collision
+//
+// A marker is just text in a shell script, so a compiler flag containing
+// the same text would be substituted too: `-DAT=@NIXGG_COMPILER@` would
+// reach the compiler as `-DAT=/nix/store/…-gcc-wrapper`. Contrived, but
+// silent, and "our flags never look like that" is exactly the assumption
+// that produced the `'`-quoting divergence.
+//
+// So the tag is chosen per script rather than fixed: markerTag scans the
+// rendered body and picks the first `NIXGG`, `NIXGG1`, `NIXGG2`, … that
+// does not already occur in it. The tag travels to the helper as an
+// argument, so both sides always agree on the spelling in use.
+const markerTagBase = "NIXGG"
+
+// markerTag returns a tag whose markers cannot collide with anything
+// already in `body`. Deterministic: same body → same tag, which matters
+// because the tag ends up in the thunk text and thus in its hash.
+func markerTag(body string) string {
+	for n := 0; ; n++ {
+		tag := markerTagBase
+		if n > 0 {
+			tag = markerTagBase + strconv.Itoa(n)
+		}
+		if !strings.Contains(body, "@"+tag+"_") {
+			return tag
+		}
 	}
+}
+
+// Marker spellings. The helper reconstructs these from the tag it is
+// passed, so any change here needs the matching change in
+// nix/resolve-script.nix — TestNativeTemplateResolvesToSandboxScript runs
+// the real helper and fails if they disagree.
+func coreutilsMarker(tag string) string { return "@" + tag + "_COREUTILS@" }
+func compilerMarker(tag string) string  { return "@" + tag + "_COMPILER@" }
+func inputMarker(tag string, i int) string {
+	return "@" + tag + "_INPUT" + strconv.Itoa(i) + "@"
+}
+
+// script returns the bash `-c` body with every store path resolved.
+// This is what sandbox mode bakes into its JSON drv.
+func (d *Derivation) script() string {
+	return d.buildScript("", d.Coreutils, d.compilerOrAR())
+}
+
+// scriptTemplate returns the same script with markers where native mode
+// cannot know the value yet, plus the tag those markers use. The thunk
+// passes both to nix/resolve-script.nix.
+func (d *Derivation) scriptTemplate() (template, tag string) {
+	// Choose the tag against the resolved body: it contains the same flag
+	// text as the template, and unlike the template it has no markers of
+	// its own to confuse the scan.
+	tag = markerTag(d.script())
+	return d.buildScript(tag, coreutilsMarker(tag), compilerMarker(tag)), tag
+}
+
+// compilerOrAR reports which store path provides the tools on PATH.
+// Compile and Link use the compiler; Archive uses whatever supplies
+// `ar` — which native mode passes as compilerRoot and sandbox mode as
+// AR. Two names, one meaning.
+func (d *Derivation) compilerOrAR() string {
+	if d.Kind == KindArchive {
+		return d.AR
+	}
+	return d.Compiler
+}
+
+// buildScript is the single source of the shell body — the layout,
+// quoting, and argv order that both wire formats must agree on.
+//
+// tag == "" means resolve everything (sandbox mode). A non-empty tag
+// means emit input markers with that tag (native mode); coreutils and
+// compiler are then marker text too.
+func (d *Derivation) buildScript(tag, coreutils, compiler string) string {
+	pathPrefix := fmt.Sprintf(`export PATH="%s/bin:%s/bin"`, coreutils, compiler)
+
+	inputs := func() string {
+		parts := make([]string, 0, len(d.Inputs))
+		for i, in := range d.Inputs {
+			if tag != "" {
+				parts = append(parts, "'"+inputMarker(tag, i)+"'")
+				continue
+			}
+			switch in.InputKind {
+			case "store":
+				ref := in.Ref
+				if !strings.HasPrefix(ref, "/nix/store/") {
+					ref = "/nix/store/" + ref
+				}
+				parts = append(parts, fmt.Sprintf("'%s/%s'", ref, in.Name))
+			case "nix":
+				parts = append(parts,
+					fmt.Sprintf("'%s/%s'", caOutputPlaceholder(in.Ref, "out"), in.Name))
+			}
+		}
+		return strings.Join(parts, " ")
+	}
+
 	switch d.Kind {
 	case KindCompile:
 		return fmt.Sprintf(
@@ -151,62 +252,31 @@ cd "$src"
 				nonLflags = append(nonLflags, f)
 			}
 		}
-		// Layout matches nix/linker.nix's shell script exactly so JSON
-		// and native modes produce byte-identical scripts.
 		if len(lflags) == 0 {
 			return fmt.Sprintf(
 				`set -euo pipefail
 %s
 mkdir -p "$out"
 "%s" %s %s -o "$out/%s"
-`, pathPrefix, d.Tool, shellQuoteFlags(d.Flags), d.linkerInputs(), d.OutName)
+`, pathPrefix, d.Tool, shellQuoteFlags(d.Flags), inputs(), d.OutName)
 		}
 		return fmt.Sprintf(
 			`set -euo pipefail
 %s
 mkdir -p "$out"
 "%s" %s %s %s -o "$out/%s"
-`, pathPrefix, d.Tool, shellQuoteFlags(nonLflags), d.linkerInputs(), shellQuoteFlags(lflags), d.OutName)
+`, pathPrefix, d.Tool, shellQuoteFlags(nonLflags), inputs(), shellQuoteFlags(lflags), d.OutName)
 	case KindArchive:
-		// Native's archiver.nix uses bare `ar` (from PATH) with `D`
-		// prepended to arFlags (see nix/archiver.nix). Mirror that
-		// exactly so drv hashes match.
+		// `ar` is taken from PATH (set above) and `D` is prepended to
+		// arFlags for a deterministic archive.
 		return fmt.Sprintf(
 			`set -euo pipefail
 %s
 mkdir -p "$out"
 ar D%s "$out/%s" %s
-`, pathPrefix, d.ARFlags, d.OutName, d.linkerInputs())
+`, pathPrefix, d.ARFlags, d.OutName, inputs())
 	}
 	return ""
-}
-
-// linkerInputs renders the input list into the shell script's argv,
-// as a single space-separated string of quoted absolute paths.
-// Called by Link and Archive scripts.
-//
-//   - InputKind="store": Ref is a canonical /nix/store/<hash>-<name>
-//     root; script sees '<Ref>/<Name>'.
-//   - InputKind="nix":   Ref is the full drv-store path
-//     (/nix/store/<hash>-<name>.drv); script sees
-//     '<ca-output-placeholder>/<Name>'. Nix substitutes the
-//     placeholder with the real output path at build time.
-func (d *Derivation) linkerInputs() string {
-	parts := make([]string, 0, len(d.Inputs))
-	for _, in := range d.Inputs {
-		switch in.InputKind {
-		case "store":
-			ref := in.Ref
-			if !strings.HasPrefix(ref, "/nix/store/") {
-				ref = "/nix/store/" + ref
-			}
-			parts = append(parts, fmt.Sprintf("'%s/%s'", ref, in.Name))
-		case "nix":
-			ph := caOutputPlaceholder(in.Ref, "out")
-			parts = append(parts, fmt.Sprintf("'%s/%s'", ph, in.Name))
-		}
-	}
-	return strings.Join(parts, " ")
 }
 
 // ToNix serialises this Derivation as an `import <helper>.nix { … }`
@@ -222,30 +292,32 @@ func (d *Derivation) linkerInputs() string {
 // Derivation-struct emitters produced (Compile/Link/Archive in
 // expr.go). Verified externally by tests/drv-equivalence.sh.
 func (d *Derivation) ToNix(helpers string) string {
+	tmpl, tag := d.scriptTemplate()
 	var b strings.Builder
 	switch d.Kind {
 	case KindCompile:
 		fmt.Fprintf(&b, "import %s/builder.nix {\n", helpers)
-		fmt.Fprintf(&b, "  toolBasename   = %q;\n", d.Tool)
 		fmt.Fprintf(&b, "  srcTree        = %s;\n", d.SrcStore) // Nix path literal, unquoted
 		fmt.Fprintf(&b, "  source         = %q;\n", d.Source)
 		fmt.Fprintf(&b, "  outName        = %q;\n", d.OutName)
-		fmt.Fprintf(&b, "  flagsJSON      = ''%s'';\n", jsonArrayIndented(d.Flags))
+		fmt.Fprintf(&b, "  scriptTemplate = %s;\n", nixIndentedStringLiteral(tmpl))
+		fmt.Fprintf(&b, "  markerTag      = %q;\n", tag)
 		fmt.Fprintf(&b, "  storeDepsJSON  = ''%s'';\n", jsonArrayIndented(d.StoreDeps))
 		fmt.Fprintf(&b, "  wrapperEnvJSON = ''%s'';\n", jsonObjectSorted(d.WrapperEnv))
 	case KindLink:
 		fmt.Fprintf(&b, "import %s/linker.nix {\n", helpers)
-		fmt.Fprintf(&b, "  toolBasename   = %q;\n", d.Tool)
 		fmt.Fprintf(&b, "  outName        = %q;\n", d.OutName)
 		fmt.Fprintf(&b, "  inputs         = %s;\n", derivInputsList(d.Inputs))
-		fmt.Fprintf(&b, "  flagsJSON      = ''%s'';\n", jsonArrayIndented(d.Flags))
+		fmt.Fprintf(&b, "  scriptTemplate = %s;\n", nixIndentedStringLiteral(tmpl))
+		fmt.Fprintf(&b, "  markerTag      = %q;\n", tag)
 		fmt.Fprintf(&b, "  storeDepsJSON  = ''%s'';\n", jsonArrayIndented(d.StoreDeps))
 		fmt.Fprintf(&b, "  wrapperEnvJSON = ''%s'';\n", jsonObjectSorted(d.WrapperEnv))
 	case KindArchive:
 		fmt.Fprintf(&b, "import %s/archiver.nix {\n", helpers)
 		fmt.Fprintf(&b, "  outName        = %q;\n", d.OutName)
 		fmt.Fprintf(&b, "  inputs         = %s;\n", derivInputsList(d.Inputs))
-		fmt.Fprintf(&b, "  arFlags        = %q;\n", d.ARFlags)
+		fmt.Fprintf(&b, "  scriptTemplate = %s;\n", nixIndentedStringLiteral(tmpl))
+		fmt.Fprintf(&b, "  markerTag      = %q;\n", tag)
 		fmt.Fprintf(&b, "  storeDepsJSON  = ''%s'';\n", jsonArrayIndented(d.StoreDeps))
 		fmt.Fprintf(&b, "  wrapperEnvJSON = ''%s'';\n", jsonObjectSorted(d.WrapperEnv))
 	}
@@ -254,8 +326,7 @@ func (d *Derivation) ToNix(helpers string) string {
 }
 
 // derivInputsList renders `inputs = [ ... ]` for linker/archiver
-// helpers. Same shape as the old InputsList in expr.go, adapted to
-// our internal derivInput type.
+// helpers, so they can interpolate each input into the script template.
 func derivInputsList(inputs []derivInput) string {
 	if len(inputs) == 0 {
 		return "[ ]"
@@ -398,4 +469,27 @@ func (d *Derivation) envDict() map[string]string {
 		env[k] = v
 	}
 	return env
+}
+
+// nixIndentedStringLiteral renders `s` as a Nix indented-string literal
+// (the two-apostrophe form) suitable for embedding in a thunk file.
+//
+// Our script templates contain `$`, `"`, `\` and single apostrophes, all
+// of which are literal inside this form. Two constructs are not, and
+// both are reachable from user flags:
+//
+//	a doubled apostrophe  — closes the string; escaped as '''
+//	${                    — starts an interpolation; escaped as ''${
+//
+// A flag carrying an empty single-quoted value, or a literal ${HOME},
+// would otherwise produce a thunk that either fails to parse or silently
+// interpolates at eval time.
+//
+// Escaping order matters: the apostrophe rule must run first, or it would
+// also rewrite the apostrophes this function itself introduces when
+// escaping `${`.
+func nixIndentedStringLiteral(s string) string {
+	e := strings.ReplaceAll(s, "''", "'''")
+	e = strings.ReplaceAll(e, "${", "''${")
+	return "''" + e + "''"
 }
