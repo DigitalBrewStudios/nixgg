@@ -53,6 +53,55 @@ The end-to-end equivalence is pinned by
 four fixtures — `hello` (3), `lua` (37), `fmt` (3), `mosh` (38) — every
 one matching byte-for-byte between the two modes.
 
+### Invoking sandbox mode explicitly
+
+The `nix build .#hello` above assumes you are inside `nix develop`,
+which supplies the patched Nix and the experimental features. To run it
+from an arbitrary shell, spell out all four:
+
+```sh
+nix build .#patched-nix -o .patched-nix     # one-time; substituted from cache
+
+./.patched-nix/bin/nix build .#hello -Lv \
+  --store 'local?root=/tmp/incremental' \
+  --extra-experimental-features "ca-derivations dynamic-derivations" \
+  --extra-system-features builder-rpc-v0
+```
+
+Every part of that is load-bearing:
+
+- **`./.patched-nix/bin/nix`** — it must be the patched Nix, not
+  whatever is on `PATH`. Your system Nix will get surprisingly far (it
+  evaluates the flake and starts the outer derivation) and then fail
+  inside the build with
+
+  ```
+  error: Submit outputs for a currently running derivation
+         not supported by store 'local'
+  ```
+
+  because `nix store submit-output` does not exist in it.
+- **`--store 'local?root=…'`** — an alternative store. Sandbox mode
+  registers derivations from inside a running build, which a normal
+  daemon store refuses.
+- **`ca-derivations dynamic-derivations`** — content-addressed outputs
+  and `builtins.outputOf`. Note the **plural** in `ca-derivations`;
+  Nix treats an unknown feature name as a warning, not an error, so a
+  typo here fails later and confusingly.
+- **`--extra-system-features builder-rpc-v0`** — `mkNixggBuild` sets
+  `requiredSystemFeatures = [ "builder-rpc-v0" ]`, so without this the
+  derivation is simply unbuildable on this machine.
+- **`-Lv`** is optional, but sandbox mode does its interesting work
+  inside a build, so without it you see none of the `[nixgg]` lines.
+
+One wrinkle worth knowing: `result` symlinks to a `/nix/store/…` path
+that does not exist on your real filesystem, because the artifact lives
+under the alt-store root. Read it there instead:
+
+```sh
+/tmp/incremental/nix/store/…-bin-hello/hello
+```
+
 ## Use it in your own project
 
 nixgg is a flake input. Pull in `mkNixggBuild` and call it with your
@@ -157,7 +206,10 @@ sandbox / dynamic-derivation exploration notes.
 - Nix ≥ 2.36 for sandbox mode (needs `builder-rpc-v0` + `nix store
   submit-output`, both merged into NixOS/nix master via
   [#15793][pr-15793]). Native mode works with older Nix.
-- The flake pins its own Nix build; `nix develop` bootstraps it.
+- The flake pins its own Nix build; `nix develop` bootstraps it, or
+  `nix build .#patched-nix` if you would rather invoke it directly —
+  see [Invoking sandbox mode explicitly](#invoking-sandbox-mode-explicitly)
+  for the full flag set and what each flag is for.
 
 [pr-15793]: https://github.com/NixOS/nix/pull/15793
 
