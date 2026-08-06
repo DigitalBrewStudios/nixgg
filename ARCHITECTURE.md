@@ -448,6 +448,45 @@ cache (mtime-based) would drop this to sub-second.
   amortization would have to happen. Making it work needs a
   bind-mounted stable host cache dir plus a story for sandbox
   isolation and build concurrency — a different, much larger change.
+
+- **Link/archive lines beyond ~1700 inputs.** Every input is rendered
+  into one space-separated string that becomes the single `bash -c`
+  argument, in both wire formats. Linux caps *one* argv string at
+  `MAX_ARG_STRLEN` = 131072 bytes, independent of the much larger
+  `ARG_MAX`. Past it, execve fails with E2BIG before bash starts.
+
+  Measured, not extrapolated: the ceiling is exactly 131072 (131072
+  fails, 131000 succeeds), and the largest script this project has
+  actually produced is LLVM's `ar-libLLVMCodeGen.a` at 42 KB — about
+  3x headroom. ffmpeg's `libavcodec.a`, at 1003 objects, reached 68 KB
+  (2x). So this is latent, but a single monolithic static library
+  roughly 3x larger than anything here reaches it.
+
+  **Two fixes that don't work, and why.** An `@file` response file
+  written by a heredoc inside the same script saves ~3% (135798 ->
+  131827 bytes for 2000 inputs) and still exceeds the limit: the
+  constraint is the script text bash receives, and a heredoc still
+  names every path inside it. Passing the list in one environment
+  variable fails for the same reason — a single env string is capped
+  at the same 131072 (verified directly).
+
+  **What does work**, in increasing order of effort:
+
+  1. *Chunked env vars.* The per-string cap is per string; the total
+     budget is `ARG_MAX` (2 MB here). Eight 100 KB chunks carry 800 KB
+     successfully — a ~6x gain — with the script iterating over the
+     chunks. Verified.
+  2. *A store-path manifest.* Write the input list to its own store
+     path and reference it as `@/nix/store/<hash>-manifest`. The
+     script becomes ~60 bytes regardless of input count, so the
+     ceiling disappears rather than moving. `ar` and `gcc` both accept
+     `@file` (verified). Costs one extra store object per link/archive
+     step and makes the manifest a real drv input.
+
+  (2) is the right answer if this ever bites; (1) is the cheap
+  stopgap. Both change the script text, so both move drv bytes for
+  every affected derivation and need a large-input-count fixture added
+  to `tests/drv-equivalence.sh` — no current fixture comes close.
   Don't re-propose the file cache on its own.
 
   Batching via the raw Nix worker protocol (to avoid per-call
