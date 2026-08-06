@@ -99,8 +99,10 @@ dispatches to the corresponding internal handler).
 
 ```
 nixgg/
-├── main.go                     argv[0] dispatch
-├── go.mod                      no external deps; stdlib only
+├── go/                         the entire Go tree — flake's `src = ./go`
+│   ├── main.go                 argv[0] dispatch
+│   ├── go.mod                  no external deps; stdlib only
+│   └── internal/               (listed below)
 ├── bin/nixgg                   built static ELF (git-ignored)
 ├── shims/                      symlinks: cc, gcc, c++, g++, ar, ranlib → ../bin/nixgg
 ├── nix/
@@ -134,7 +136,7 @@ nixgg/
 ├── example/                    smoke-test Makefile (main.cc + util.cc)
 ├── tests/
 │   └── drv-equivalence.sh      native ↔ sandbox drv-hash regression test
-└── internal/
+└── go/internal/
     ├── dispatch/               argv[0] classification, @rspfile expansion
     ├── mode/                   placeholder vs. realise (filename patterns)
     ├── toolchain/              NIXGG_* env loading
@@ -473,7 +475,7 @@ cache (mtime-based) would drop this to sub-second.
 ## Building the binary
 
 ```
-CGO_ENABLED=0 go build -ldflags='-s -w' -tags 'osusergo netgo' -o bin/nixgg .
+cd go && CGO_ENABLED=0 go build -ldflags='-s -w' -tags 'osusergo netgo' -o ../bin/nixgg .
 ```
 
 Or via the flake:

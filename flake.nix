@@ -189,16 +189,12 @@
           nixggBin = pkgs.buildGoModule {
             pname = "nixgg";
             version = "0";
-            src = builtins.path {
-              name = "nixgg-src";
-              path = ./.;
-              # Skip generated / scratch dirs.
-              filter = path: type:
-                let base = baseNameOf path; in
-                base != "bin" && base != "dyn-drv"
-                && !(pkgs.lib.hasPrefix "." base)
-                && base != "shims";
-            };
+            # The Go tree lives under go/ so that editing anything else
+            # in the repo — nix/*.nix, examples, docs — cannot change
+            # this derivation's hash. It used to be ./. with an
+            # exclusion filter, which meant every doc tweak rebuilt the
+            # binary and moved every -shell drvPath with it.
+            src = ./go;
             vendorHash = null;  # no deps
             doCheck = false;
             postInstall = ''

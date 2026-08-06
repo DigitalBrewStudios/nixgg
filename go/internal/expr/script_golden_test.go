@@ -34,7 +34,7 @@ import (
 // resulting derivation — the bash body. helper is a basename in nix/.
 func nixEvalScript(t *testing.T, helper string, argsNix string) string {
 	t.Helper()
-	dir, err := filepath.Abs("../../nix")
+	dir, err := filepath.Abs("../../../nix")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -198,7 +198,7 @@ func TestScriptEndsWithNewline(t *testing.T) {
 // argument needs pure-store-path in scope as `ps`.
 func nixEvalScriptWithPS(t *testing.T, helper string, argsNix string) string {
 	t.Helper()
-	dir, err := filepath.Abs("../../nix")
+	dir, err := filepath.Abs("../../../nix")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -406,7 +406,7 @@ func TestScriptTemplateSurvivesNixParsing(t *testing.T) {
 // nixHelperPath returns the absolute path of a helper in nix/.
 func nixHelperPath(t *testing.T, name string) string {
 	t.Helper()
-	dir, err := filepath.Abs("../../nix")
+	dir, err := filepath.Abs("../../../nix")
 	if err != nil {
 		t.Fatal(err)
 	}
