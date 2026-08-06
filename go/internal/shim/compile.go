@@ -72,11 +72,7 @@ func Compile(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.L
 
 	// Fill in a default output name if -o was omitted.
 	if output == "" {
-		base := filepath.Base(source)
-		if dot := strings.LastIndexByte(base, '.'); dot > 0 {
-			base = base[:dot]
-		}
-		output = base + ".o"
+		output = defaultOutputName(source, flags)
 	}
 
 	logf("compile %s -> %s", source, output)
@@ -298,6 +294,9 @@ func baseNameOf(p string) string {
 // in that case the caller passes through to the real cc.
 func parseCompileArgs(args []string) (source, output string, flags []string, ok bool) {
 	hasDashC := false
+	// Non-empty once `-x <lang>` has been seen: from that point a
+	// non-flag token is the source whatever its extension.
+	explicitLang := ""
 	for i := 0; i < len(args); i++ {
 		a := args[i]
 		switch {
@@ -329,12 +328,27 @@ func parseCompileArgs(args []string) (source, output string, flags []string, ok 
 				return "", "", nil, false
 			}
 			flags = append(flags, a, args[i+1])
+			// `-x <lang>` overrides extension-based language detection,
+			// so the source that follows need not have a known suffix.
+			// The canonical case is a precompiled header:
+			//
+			//	g++ -x c++-header -c pch.h -o pch.h.gch
+			//
+			// isSource rejects .h, so without this the whole TU fell to
+			// Passthrough — correct output, never cached or distributed.
+			if a == "-x" {
+				explicitLang = args[i+1]
+			}
 			i++
 		case isSource(a):
 			if source != "" {
 				// Multiple sources — we don't model that in a single TU.
 				return "", "", nil, false
 			}
+			source = a
+		case explicitLang != "" && source == "" && !strings.HasPrefix(a, "-"):
+			// A bare token after `-x <lang>`: the source, by the driver's
+			// own rules, even though its extension says nothing.
 			source = a
 		default:
 			flags = append(flags, a)
@@ -482,4 +496,47 @@ func altStoreOnDisk(storeURL, canonical string) string {
 // they would to fmt.Fprintf.
 func logf(format string, args ...any) {
 	fmt.Fprintf(os.Stderr, "[nixgg]   "+format+"\n", args...)
+}
+
+// defaultOutputName is what the compiler would write to when -o is
+// omitted. Two rules, and they differ in a way that is easy to get wrong:
+//
+//	a.cc  -> a.o          extension replaced
+//	pch.h -> pch.h.gch    extension kept, .gch appended
+//
+// Verified against gcc by compiling a header with no -o.
+func defaultOutputName(source string, flags []string) string {
+	base := filepath.Base(source)
+	if isHeaderLang(langOf(flags)) {
+		return base + ".gch"
+	}
+	if dot := strings.LastIndexByte(base, '.'); dot > 0 {
+		base = base[:dot]
+	}
+	return base + ".o"
+}
+
+// langOf returns the value of the last `-x <lang>` in flags, or "" if
+// there is none. parseCompileArgs keeps both tokens, so the language the
+// caller asked for is recoverable without widening its signature.
+func langOf(flags []string) string {
+	lang := ""
+	for i := 0; i+1 < len(flags); i++ {
+		if flags[i] == "-x" {
+			lang = flags[i+1]
+		}
+	}
+	return lang
+}
+
+// isHeaderLang reports whether a `-x <lang>` value names a header
+// language, i.e. this compile produces a precompiled header rather than
+// an object file. The output-naming rule differs: gcc appends .gch to the
+// source's full name instead of replacing its extension with .o.
+func isHeaderLang(lang string) bool {
+	switch lang {
+	case "c-header", "c++-header", "objective-c-header", "objective-c++-header":
+		return true
+	}
+	return false
 }
