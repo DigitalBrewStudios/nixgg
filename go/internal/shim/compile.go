@@ -58,7 +58,16 @@ func Compile(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.L
 	// under g++ fails `-std=c99` + designated-initializer parsing).
 	realTool := realToolFor(cfg, tool)
 	if bypassed() {
-		logf("compile passthrough: NIXGG_BYPASS is set")
+		// No logf here: bypass mode exists for configure/cmake probes
+		// that capture stderr byte-for-byte (autoconf's
+		// ac_fn_c_check_header_preproc treats ANY non-empty stderr
+		// from `gcc -E` as a failed check, exit code notwithstanding).
+		// A "[nixgg] ..." diagnostic line here was silently flipping
+		// HAVE_LIMITS_H/HAVE_FCNTL_H/etc. to "no" for every libiberty
+		// probe even though gcc exited 0 — Passthrough's own contract
+		// is that stdin/stdout/stderr stay untouched; logging here
+		// broke that contract for exactly the callers that most need
+		// it honored.
 		return Passthrough(realTool, args)
 	}
 	source, output, flags, ok := parseCompileArgs(args)

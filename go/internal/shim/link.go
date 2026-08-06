@@ -31,7 +31,10 @@ import (
 func Link(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layout) error {
 	realTool := realToolFor(cfg, tool)
 	if bypassed() {
-		logf("link passthrough: NIXGG_BYPASS is set")
+		// See compile.go's identical carveout: no logf here, bypass
+		// mode's whole point is byte-for-byte passthrough, and
+		// autoconf/cmake link probes (AC_LINK_IFELSE, try_compile)
+		// capture stderr and can treat any output as failure.
 		return Passthrough(realTool, args)
 	}
 	// Refuse compile-family invocations that only *look* like a link.

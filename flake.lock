@@ -67,6 +67,19 @@
         "type": "github"
       }
     },
+    "gcc-src": {
+      "flake": false,
+      "locked": {
+        "lastModified": 1781246212,
+        "narHash": "sha256-knrCP4LNU8w2tuTofFPSfLTvMw/idlKnFbanFcoNHAs=",
+        "type": "tarball",
+        "url": "https://ftp.gnu.org/gnu/gcc/gcc-15.3.0/gcc-15.3.0.tar.xz"
+      },
+      "original": {
+        "type": "tarball",
+        "url": "https://ftp.gnu.org/gnu/gcc/gcc-15.3.0/gcc-15.3.0.tar.xz"
+      }
+    },
     "git-hooks-nix": {
       "inputs": {
         "flake-compat": [
@@ -242,6 +255,7 @@
       "inputs": {
         "ffmpeg-src": "ffmpeg-src",
         "fmt-src": "fmt-src",
+        "gcc-src": "gcc-src",
         "llvm-src": "llvm-src",
         "lua-src": "lua-src",
         "mosh-src": "mosh-src",

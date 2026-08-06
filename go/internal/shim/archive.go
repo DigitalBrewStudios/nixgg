@@ -27,7 +27,7 @@ import (
 // with the caller's exact intent.
 func Archive(args []string, cfg *toolchain.Config, l paths.Layout) error {
 	if bypassed() {
-		logf("ar passthrough: NIXGG_BYPASS is set")
+		// See compile.go's identical carveout: no logf here.
 		return Passthrough(realARFor(cfg), args)
 	}
 	modifiers, archive, inputs, ok := parseARArgs(args)

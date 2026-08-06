@@ -53,6 +53,16 @@
     url = "https://ffmpeg.org/releases/ffmpeg-7.1.2.tar.xz";
     flake = false;
   };
+  inputs.gcc-src = {
+    # GCC 15.3.0 — matches this flake's own pinned nixpkgs gcc
+    # (nixpkgs#gcc.cc is 15.3.0; see llvm-src's comment above). We
+    # only build libiberty/ (see examples/gcc's docstring for why),
+    # so the exact minor doesn't matter for correctness, but pinning
+    # the same version as the ambient toolchain avoids a pointless
+    # second GCC-version mental model.
+    url = "https://ftp.gnu.org/gnu/gcc/gcc-15.3.0/gcc-15.3.0.tar.xz";
+    flake = false;
+  };
   inputs.llvm-src = {
     # LLVM monorepo checkout. We only build llvm/ (no clang/lld/etc.),
     # targeting X86 to keep the TU count and wall-clock reasonable while
@@ -78,7 +88,7 @@
 
   outputs =
     { self, nixpkgs, nix-15793, lua-src, fmt-src, mosh-src, redis-src, ffmpeg-src,
-      llvm-src }:
+      gcc-src, llvm-src }:
     let
       forEachSystem = f: builtins.mapAttrs (system: pkgs: f system pkgs) nixpkgs.legacyPackages;
     in
@@ -292,6 +302,17 @@
                 src = ffmpeg-src;
               };
             };
+            # GCC's own libiberty/ subdir, built via ITS standalone
+            # shipped `./configure` — not gcc's top-level multi-package
+            # configure.ac. See examples/gcc's docstring for why this
+            # (deliberately smaller) target sidesteps every GCC-specific
+            # hazard (GMP/MPFR/MPC, LTO --plugin ar/ranlib decoration,
+            # thin archives, mid-build gengtype/genmodes exec) that a
+            # full cc1/cc1plus build would hit.
+            gcc = {
+              dir = ./examples/gcc;
+              args = { src = gcc-src; };
+            };
             # Two sources, no single `src`: phase 1 builds the codegen
             # tool, phase 2 execs it mid-build. Smoke test for the
             # phase-chaining pattern examples/llvm relies on.
@@ -328,7 +349,7 @@
           exampleShells = pkgs.lib.mapAttrs' (n: e: pkgs.lib.nameValuePair "${n}-shell" e.shell) examples;
         in
         toolchain
-        // exampleResults   # .#hello .#lua .#fmt .#mosh .#redis .#ffmpeg .#two-phase .#llvm
+        // exampleResults   # .#hello .#lua .#fmt .#mosh .#redis .#ffmpeg .#gcc .#two-phase .#llvm
         // exampleShells    # .#<name>-shell for each of the above
         // {
           # Extras an individual example exposes beyond .result/.shell.

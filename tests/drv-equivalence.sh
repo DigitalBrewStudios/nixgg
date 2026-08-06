@@ -265,6 +265,9 @@ fi
 if [[ -z "${ONLY:-}" || "$ONLY" == "mosh" ]]; then
   run_fixture "mosh" "mosh-src" "" || fail=1
 fi
+if [[ -z "${ONLY:-}" || "$ONLY" == "gcc" ]]; then
+  run_fixture "gcc" "gcc-src" "" || fail=1
+fi
 
 echo
 if (( fail )); then
