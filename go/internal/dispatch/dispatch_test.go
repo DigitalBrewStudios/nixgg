@@ -1,6 +1,11 @@
 package dispatch
 
-import "testing"
+import (
+	"os"
+	"path/filepath"
+	"reflect"
+	"testing"
+)
 
 // TestFromArgv0 pins the argv[0] → role mapping.
 //
@@ -107,5 +112,104 @@ func TestBasenameIsClosedOverSixNames(t *testing.T) {
 	// ToolUnknown has no basename; nothing should map to "".
 	if got := ToolUnknown.Basename(); got != "" {
 		t.Errorf("ToolUnknown.Basename() = %q, want empty", got)
+	}
+}
+
+// TestSplitRspLine pins response-file tokenisation.
+//
+// The bug this replaces: `strings.Fields` split the line first and a
+// per-token unquote ran second, so any quoted argument containing a space
+// — the only reason to quote at all — was already shattered by the time
+// unquoting happened:
+//
+//	"-DGREETING=hello world"  ->  ["-DGREETING=hello, world"]
+//
+// each fragment keeping a stray quote character. cmake and ninja emit
+// exactly that shape for defines with spaces, and ExpandRspfiles runs on
+// every shim invocation, so the corrupted flag went straight to the
+// compiler. Confirmed against real gcc: it treats the quoted run as one
+// argument whose macro body is `hello world`.
+func TestSplitRspLine(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		line string
+		want []string
+	}{
+		{"plain", `-O2 -Wall`, []string{"-O2", "-Wall"}},
+		{"empty", ``, nil},
+		{"only spaces", `   `, nil},
+		{"tabs separate too", "-O2\t-Wall", []string{"-O2", "-Wall"}},
+
+		// The regression.
+		{"double-quoted value with a space",
+			`-DGREETING="hello world" -DA=1`,
+			[]string{"-DGREETING=hello world", "-DA=1"}},
+		{"whole arg double-quoted",
+			`"-DGREETING=hello world" -DA=2`,
+			[]string{"-DGREETING=hello world", "-DA=2"}},
+		{"single-quoted value with a space",
+			`-DGREETING='hello world'`,
+			[]string{"-DGREETING=hello world"}},
+		{"several quoted args on one line",
+			`"-DA=x y" "-DB=p q"`,
+			[]string{"-DA=x y", "-DB=p q"}},
+
+		// Quoting minutiae the drivers permit.
+		{"quote opens mid-token", `-DX="a b"c`, []string{"-DX=a bc"}},
+		{"empty quoted value still yields a token", `-DX=""`, []string{"-DX="}},
+		{"bare empty quotes yield an empty token", `""`, []string{""}},
+		{"single quotes are literal inside double quotes",
+			`-DX="it's"`, []string{"-DX=it's"}},
+		{"double quotes are literal inside single quotes",
+			`-DX='say "hi"'`, []string{`-DX=say "hi"`}},
+		{"backslash escapes inside double quotes",
+			`-DX="a\"b"`, []string{`-DX=a"b`}},
+		{"backslash is literal inside single quotes",
+			`-DX='a\b'`, []string{`-DX=a\b`}},
+		{"windows-style path keeps its backslashes unquoted",
+			`-IC:\proj\inc`, []string{`-IC:\proj\inc`}},
+
+		// Malformed input must degrade, not crash: the compiler will
+		// reject a bad flag on its own terms, and erroring here would
+		// turn that into a nixgg failure.
+		{"unterminated double quote", `-DX="a b`, []string{"-DX=a b"}},
+		{"unterminated single quote", `-DX='a b`, []string{"-DX=a b"}},
+		{"lone quote", `"`, []string{""}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := splitRspLine(tc.line)
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Errorf("splitRspLine(%q)\n got: %q\nwant: %q", tc.line, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestExpandRspfilesPreservesQuotedSpaces drives the whole path through a
+// real file on disk, since that is what a shim actually sees. The unit
+// test above pins the tokeniser; this pins that ExpandRspfiles uses it.
+func TestExpandRspfilesPreservesQuotedSpaces(t *testing.T) {
+	dir := t.TempDir()
+	rsp := filepath.Join(dir, "link.rsp")
+	body := "-DGREETING=\"hello world\"\n-O2\n\"-DPATH=/a b/c\"\n"
+	if err := os.WriteFile(rsp, []byte(body), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got := ExpandRspfiles([]string{"cc", "@" + rsp, "main.c"})
+	want := []string{"cc", "-DGREETING=hello world", "-O2", "-DPATH=/a b/c", "main.c"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("ExpandRspfiles\n got: %q\nwant: %q", got, want)
+	}
+}
+
+// TestExpandRspfilesLeavesNonFilesAlone pins the existing guard: plenty
+// of legitimate flags start with @, so an @arg that isn't a readable file
+// must pass through untouched.
+func TestExpandRspfilesLeavesNonFilesAlone(t *testing.T) {
+	in := []string{"cc", "@notafile", "-O2"}
+	got := ExpandRspfiles(in)
+	if !reflect.DeepEqual(got, in) {
+		t.Errorf("ExpandRspfiles mangled a non-file @arg\n got: %q\nwant: %q", got, in)
 	}
 }

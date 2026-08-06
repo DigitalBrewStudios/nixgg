@@ -144,8 +144,9 @@ func IsCompile(argv []string) bool {
 }
 
 // ExpandRspfiles walks argv and replaces any @rspfile entries with the
-// contents of the referenced file. Quoted args are unquoted; whitespace
-// is used as the separator. Returns a fresh slice.
+// contents of the referenced file, tokenised the way the compiler drivers
+// do it: whitespace separates arguments, except inside quotes. Returns a
+// fresh slice.
 //
 // If no @-file is present the input is returned unchanged (no copy).
 func ExpandRspfiles(argv []string) []string {
@@ -188,9 +189,7 @@ func readRspfile(path string) ([]string, error) {
 	sc := bufio.NewScanner(f)
 	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
 	for sc.Scan() {
-		for _, tok := range strings.Fields(sc.Text()) {
-			out = append(out, unquote(tok))
-		}
+		out = append(out, splitRspLine(sc.Text())...)
 	}
 	if err := sc.Err(); err != nil {
 		return nil, err
@@ -198,15 +197,68 @@ func readRspfile(path string) ([]string, error) {
 	return out, nil
 }
 
-// unquote trims a single layer of matched surrounding quotes. Rspfiles
-// are typically shell-tokenized already; ninja quotes strings that
-// contain spaces. We handle both "..." and '...'.
-func unquote(s string) string {
-	if len(s) < 2 {
-		return s
+// splitRspLine tokenises one response-file line: whitespace separates
+// arguments, but not inside quotes.
+//
+// This used to be `strings.Fields` followed by a per-token unquote, which
+// is the wrong order. A quoted argument containing a space — which is the
+// only reason to quote in the first place — was split at that space
+// before unquoting ever ran, so
+//
+//	"-DGREETING=hello world"
+//
+// became the two argv entries `"-DGREETING=hello` and `world"`, each
+// carrying a stray quote character. cmake and ninja emit exactly this
+// shape for defines with spaces, and ExpandRspfiles runs on every shim
+// invocation, so the flag reached the compiler corrupted.
+//
+// Both quote styles are handled, and a quote can open mid-token
+// (`-DX="a b"`) as the drivers allow. A backslash escapes the next
+// character inside double quotes only — matching GCC's documented
+// behaviour, where single quotes are literal throughout. An unterminated
+// quote yields what has accumulated rather than an error: the compiler
+// would reject the flag anyway, and failing here would turn a bad flag
+// into a nixgg crash.
+func splitRspLine(line string) []string {
+	var (
+		out   []string
+		cur   strings.Builder
+		inTok bool
+		quote byte // 0, '\'' or '"'
+	)
+	flush := func() {
+		if inTok {
+			out = append(out, cur.String())
+			cur.Reset()
+			inTok = false
+		}
 	}
-	if (s[0] == '"' && s[len(s)-1] == '"') || (s[0] == '\'' && s[len(s)-1] == '\'') {
-		return s[1 : len(s)-1]
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case quote != 0:
+			if c == '\\' && quote == '"' && i+1 < len(line) {
+				i++
+				cur.WriteByte(line[i])
+				continue
+			}
+			if c == quote {
+				quote = 0
+				continue
+			}
+			cur.WriteByte(c)
+		case c == '\'' || c == '"':
+			// Opening a quoted run. The token exists even if the quotes
+			// turn out to be empty, so `-DX=""` yields `-DX=`.
+			quote = c
+			inTok = true
+		case c == ' ' || c == '\t' || c == '\r' || c == '\n':
+			flush()
+		default:
+			cur.WriteByte(c)
+			inTok = true
+		}
 	}
-	return s
+	flush()
+	return out
 }
