@@ -330,3 +330,92 @@ func TestStoreInputPreservesSubpath(t *testing.T) {
 		}
 	})
 }
+
+// TestResolveLibFlagFindsSharedLibs pins that `-lfoo` can resolve to a
+// nixgg-produced libfoo.so, not only libfoo.a.
+//
+// The candidate list was hardcoded to lib<name>.a, so a project linking
+// its own shared library the ordinary way — `-L. -lfoo` against a
+// libfoo.so nixgg had just built — never matched. The flag stayed a bare
+// `-lfoo` with no staged input, and the link died at
+// `ld: cannot find -lfoo`.
+//
+// This is the third defect in this same area: 28cd274 taught the shim to
+// recognise a positional .so, a later fix stopped dropping the /lib/
+// subdirectory of a consumed .so, and the `-l` search path still only
+// knew about archives. Worth stating so the next reader checks all three
+// representations when touching library handling.
+//
+// Search order is load-bearing and verified against the real linker:
+// ld tries lib<name>.so before lib<name>.a in each -L directory and takes
+// the first hit. Claiming the archive first would silently link something
+// different from what the caller's toolchain would have chosen.
+func TestResolveLibFlagFindsSharedLibs(t *testing.T) {
+	t.Run("plain -lfoo resolves a .so thunk", func(t *testing.T) {
+		dir := t.TempDir()
+		so := filepath.Join(dir, "libfoo.so")
+		// Native mode marks an unrealised output with a symlink.
+		if err := os.Symlink(filepath.Join(dir, "whatever.nix"), so); err != nil {
+			t.Fatal(err)
+		}
+		if got := resolveLibFlag("foo", []string{dir}); got != so {
+			t.Errorf("resolveLibFlag(\"foo\") = %q, want %q — a self-built shared "+
+				"library is invisible to -l resolution, so the link fails at "+
+				"`ld: cannot find -lfoo`", got, so)
+		}
+	})
+
+	t.Run("plain -lfoo resolves a .so drvref stub", func(t *testing.T) {
+		dir := t.TempDir()
+		so := filepath.Join(dir, "libfoo.so")
+		if err := os.WriteFile(so, []byte(drvref.Body("/nix/store/"+
+			strings.Repeat("a", 32)+"-bin-libfoo.so.drv")), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := resolveLibFlag("foo", []string{dir}); got != so {
+			t.Errorf("sandbox-mode .so stub not resolved: got %q, want %q", got, so)
+		}
+	})
+
+	t.Run("shared library wins over an archive in the same dir", func(t *testing.T) {
+		dir := t.TempDir()
+		for _, n := range []string{"libfoo.so", "libfoo.a"} {
+			if err := os.WriteFile(filepath.Join(dir, n), []byte(drvref.Body(
+				"/nix/store/"+strings.Repeat("b", 32)+"-x.drv")), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}
+		want := filepath.Join(dir, "libfoo.so")
+		if got := resolveLibFlag("foo", []string{dir}); got != want {
+			t.Errorf("resolveLibFlag = %q, want %q — ld searches .so first, so "+
+				"claiming the archive links something the caller's toolchain "+
+				"would not have chosen", got, want)
+		}
+	})
+
+	t.Run("archive still resolves when there is no .so", func(t *testing.T) {
+		dir := t.TempDir()
+		a := filepath.Join(dir, "libfoo.a")
+		if err := os.WriteFile(a, []byte(drvref.Body("/nix/store/"+
+			strings.Repeat("c", 32)+"-ar-libfoo.a.drv")), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := resolveLibFlag("foo", []string{dir}); got != a {
+			t.Errorf("archive resolution regressed: got %q, want %q", got, a)
+		}
+	})
+
+	t.Run("a foreign .so is still not claimed", func(t *testing.T) {
+		// A system library that nixgg did not produce has neither a
+		// thunk symlink nor a drvref header. Claiming it would put a
+		// path in the drv that the sandbox never staged.
+		dir := t.TempDir()
+		if err := os.WriteFile(filepath.Join(dir, "libfoo.so"),
+			[]byte("\x7fELF not ours"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if got := resolveLibFlag("foo", []string{dir}); got != "" {
+			t.Errorf("resolveLibFlag claimed a foreign .so: %q", got)
+		}
+	})
+}

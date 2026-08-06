@@ -233,7 +233,13 @@ func resolveLibFlag(name string, libDirs []string) string {
 		}
 		files = []string{exact}
 	} else {
-		files = []string{"lib" + name + ".a"}
+		// Order matters: ld searches lib<name>.so before lib<name>.a in
+		// each -L directory and takes the first hit (verified against
+		// the real linker with -Wl,-t). Checking .a first would claim
+		// the static archive for a `-lfoo` the linker would have
+		// resolved to the shared object, silently changing what gets
+		// linked.
+		files = []string{"lib" + name + ".so", "lib" + name + ".a"}
 	}
 	for _, d := range libDirs {
 		for _, f := range files {

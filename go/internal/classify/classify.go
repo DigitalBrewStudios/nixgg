@@ -181,6 +181,19 @@ func Target(path, altStorePrefix string, l paths.Layout) Result {
 	if strings.HasSuffix(dest, ".nix") {
 		return Result{Kind: Thunk, Ref: dest}
 	}
+	// Sandbox mode again: the symlink resolved to one of our own drvref
+	// stubs rather than into the store. This is what a SONAME alias chain
+	// looks like — libfoo.so -> libfoo.so.1.2.3, ordinary libtool and
+	// autotools output — where the target is the stub nixgg wrote for the
+	// real link output.
+	//
+	// Without this, such an input classifies as Regular, the link shim's
+	// default case fires, and the whole link silently degrades to an
+	// unaccelerated Passthrough. The direct-regular-file branch above has
+	// always checked this; the symlink path did not.
+	if ref := drvref.Path(dest); ref != "" {
+		return Result{Kind: Drv, Ref: ref}
+	}
 	return Result{Kind: Regular}
 }
 

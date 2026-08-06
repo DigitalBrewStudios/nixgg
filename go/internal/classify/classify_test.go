@@ -265,3 +265,80 @@ func TestTargetDistinguishesStatFailure(t *testing.T) {
 		}
 	})
 }
+
+// TestTargetSymlinkToDrvRefStub pins that a symlink resolving to one of
+// our own drvref stubs is recognised as Drv.
+//
+// This is what a SONAME alias chain looks like — `libfoo.so ->
+// libfoo.so.1.2.3`, which is ordinary libtool and autotools output —
+// where the final target is the stub nixgg wrote for the real link
+// output. The direct-regular-file branch has always checked drvref; the
+// symlink branch did not, so such an input classified as Regular, the
+// link shim's default case fired, and the entire link silently degraded
+// to an unaccelerated Passthrough. No wrong bytes, just no acceleration
+// and no explanation.
+func TestTargetSymlinkToDrvRefStub(t *testing.T) {
+	drv := "/nix/store/" + strings.Repeat("a", 32) + "-bin-libfoo.so.drv"
+
+	t.Run("one hop", func(t *testing.T) {
+		dir := t.TempDir()
+		real := filepath.Join(dir, "libfoo.so.1.2.3")
+		if err := os.WriteFile(real, []byte(drvref.Body(drv)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		alias := filepath.Join(dir, "libfoo.so")
+		if err := os.Symlink(real, alias); err != nil {
+			t.Fatal(err)
+		}
+
+		got := Target(alias, "", paths.Layout{})
+		if got.Kind != Drv {
+			t.Fatalf("Kind = %v, want Drv — a SONAME alias to our own stub "+
+				"reads as Regular, so the link falls back to Passthrough", got.Kind)
+		}
+		if got.Ref != drv {
+			t.Errorf("Ref = %q, want %q", got.Ref, drv)
+		}
+	})
+
+	t.Run("multi hop", func(t *testing.T) {
+		// libfoo.so -> libfoo.so.1 -> libfoo.so.1.2.3, the full chain
+		// autotools actually produces.
+		dir := t.TempDir()
+		real := filepath.Join(dir, "libfoo.so.1.2.3")
+		if err := os.WriteFile(real, []byte(drvref.Body(drv)), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		mid := filepath.Join(dir, "libfoo.so.1")
+		if err := os.Symlink(real, mid); err != nil {
+			t.Fatal(err)
+		}
+		alias := filepath.Join(dir, "libfoo.so")
+		if err := os.Symlink(mid, alias); err != nil {
+			t.Fatal(err)
+		}
+
+		got := Target(alias, "", paths.Layout{})
+		if got.Kind != Drv || got.Ref != drv {
+			t.Errorf("multi-hop chain: Kind=%v Ref=%q, want Drv %q", got.Kind, got.Ref, drv)
+		}
+	})
+
+	t.Run("symlink to a foreign file is still Regular", func(t *testing.T) {
+		// A system library reached through a symlink must NOT be claimed:
+		// nixgg never staged it, so referencing it would produce a drv
+		// input that doesn't exist in the sandbox.
+		dir := t.TempDir()
+		real := filepath.Join(dir, "libsystem.so.6")
+		if err := os.WriteFile(real, []byte("\x7fELF not ours"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		alias := filepath.Join(dir, "libsystem.so")
+		if err := os.Symlink(real, alias); err != nil {
+			t.Fatal(err)
+		}
+		if got := Target(alias, "", paths.Layout{}); got.Kind != Regular {
+			t.Errorf("Kind = %v, want Regular for a foreign library", got.Kind)
+		}
+	})
+}
