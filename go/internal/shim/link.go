@@ -56,12 +56,9 @@ func Link(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layo
 		c := classify.Target(in, altPrefix, l)
 		switch c.Kind {
 		case classify.Store:
-			linkInputs = append(linkInputs, expr.Input{
-				Kind: "store", Ref: c.Ref, Name: filepath.Base(in),
-			})
-			jsonInputs = append(jsonInputs, expr.JSONDrvInput{
-				Kind: "src", Ref: filepath.Base(c.Ref), Name: filepath.Base(in),
-			})
+			ni, ji := storeInput(c, in)
+			linkInputs = append(linkInputs, ni)
+			jsonInputs = append(jsonInputs, ji)
 		case classify.Thunk:
 			linkInputs = append(linkInputs, expr.Input{
 				Kind: "nix", Ref: c.Ref, Name: filepath.Base(in),

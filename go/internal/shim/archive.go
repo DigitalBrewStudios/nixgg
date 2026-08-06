@@ -43,12 +43,9 @@ func Archive(args []string, cfg *toolchain.Config, l paths.Layout) error {
 		c := classify.Target(in, altPrefix, l)
 		switch c.Kind {
 		case classify.Store:
-			arInputs = append(arInputs, expr.Input{
-				Kind: "store", Ref: c.Ref, Name: filepath.Base(in),
-			})
-			jsonInputs = append(jsonInputs, expr.JSONDrvInput{
-				Kind: "src", Ref: filepath.Base(c.Ref), Name: filepath.Base(in),
-			})
+			ni, ji := storeInput(c, in)
+			arInputs = append(arInputs, ni)
+			jsonInputs = append(jsonInputs, ji)
 		case classify.Thunk:
 			arInputs = append(arInputs, expr.Input{
 				Kind: "nix", Ref: c.Ref, Name: filepath.Base(in),

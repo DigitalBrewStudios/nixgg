@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/tbereknyei/nixgg/internal/classify"
 	"github.com/tbereknyei/nixgg/internal/drvref"
 )
 
@@ -262,4 +263,70 @@ func TestResolveLibFlagExactNameForm(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestStoreInputPreservesSubpath guards the composition step that caused a
+// real LLVM link failure:
+//
+//	ld.bfd: cannot find /nix/store/…-zlib-1.3.2/libz.so
+//
+// LLVM's cmake puts an absolute positional shared library on the link
+// line. Classification correctly reduces it to the store root — that is
+// what builtins.storePath and inputs.srcs require — and the shim then
+// composes the argv token as Ref+"/"+Name. Using the caller-visible
+// basename for Name drops the intervening "lib/", producing a path that
+// does not exist.
+//
+// This is a distinct failure from the one link_test already covers:
+// isSharedLib correctly RECOGNISED libz.so as an input (that part worked).
+// The bug was one layer later, in what path got written for it — which is
+// why the earlier tests passed while a real build broke.
+func TestStoreInputPreservesSubpath(t *testing.T) {
+	const root = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-zlib-1.3.2"
+
+	t.Run("subpath input keeps its directories", func(t *testing.T) {
+		c := classify.Result{Kind: classify.Store, Ref: root, Sub: "lib/libz.so"}
+		ni, ji := storeInput(c, "/build/llvm/libz.so")
+
+		if ni.Ref != root {
+			t.Errorf("native Ref = %q, want the store root %q", ni.Ref, root)
+		}
+		if ni.Name != "lib/libz.so" {
+			t.Errorf("native Name = %q, want \"lib/libz.so\" — the serializers render\n"+
+				"Ref+\"/\"+Name, so a bare basename links against a nonexistent file",
+				ni.Name)
+		}
+		if ji.Name != "lib/libz.so" {
+			t.Errorf("sandbox Name = %q, want \"lib/libz.so\"", ji.Name)
+		}
+		// inputs.srcs takes a basename, and must stay the ROOT's basename:
+		// the sandbox mounts the whole store object, not one file in it.
+		if want := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-zlib-1.3.2"; ji.Ref != want {
+			t.Errorf("sandbox Ref = %q, want %q", ji.Ref, want)
+		}
+	})
+
+	t.Run("direct child falls back to the basename", func(t *testing.T) {
+		// Everything nixgg produces has this shape, and all 81 pinned drvs
+		// depend on it: an empty Sub must yield exactly the old behavior.
+		c := classify.Result{Kind: classify.Store, Ref: root, Sub: ""}
+		ni, ji := storeInput(c, "/build/obj/main.o")
+		if ni.Name != "main.o" {
+			t.Errorf("native Name = %q, want \"main.o\"", ni.Name)
+		}
+		if ji.Name != "main.o" {
+			t.Errorf("sandbox Name = %q, want \"main.o\"", ji.Name)
+		}
+	})
+
+	t.Run("Sub wins over the caller-visible name", func(t *testing.T) {
+		// A Makefile can reference a library through a differently-named
+		// symlink. Sub describes where the bytes actually are, so it must
+		// take precedence over what the caller called it.
+		c := classify.Result{Kind: classify.Store, Ref: root, Sub: "lib/libz.so.1.3.2"}
+		ni, _ := storeInput(c, "/build/deps/libz.so")
+		if ni.Name != "lib/libz.so.1.3.2" {
+			t.Errorf("native Name = %q, want the resolved Sub, not the caller's name", ni.Name)
+		}
+	})
 }

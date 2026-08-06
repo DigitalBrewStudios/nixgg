@@ -60,11 +60,37 @@ func (k Kind) String() string {
 type Result struct {
 	Kind Kind
 	Ref  string
+	// Sub is the path of the target relative to Ref, set when
+	// Kind == Store and the target lives BELOW the store root rather
+	// than directly inside it — e.g. Ref=/nix/store/…-zlib with
+	// Sub="lib/libz.so". Empty when the target is Ref/<basename>.
+	//
+	// Callers need both halves: Ref is what `builtins.storePath` and
+	// inputs.srcs require (they take a root, not an arbitrary subpath),
+	// while Ref+"/"+Sub is what belongs on the compiler's argv.
+	// Reconstructing the argv from Ref plus the basename alone silently
+	// loses the intermediate directories — which is how LLVM's
+	// positional `…-zlib-1.3.2/lib/libz.so` became a link against a
+	// nonexistent `…-zlib-1.3.2/libz.so`.
+	Sub string
 	// ThunkID is set when Kind == Store AND we know which thunk file
 	// produced this output (only populated for promoted regular files
 	// today — a real symlink → /nix/store/... doesn't carry that
 	// association). Empty otherwise.
 	ThunkID string
+}
+
+// ArgvPath returns the path that belongs on a compiler/linker command
+// line for a Store result, given the caller-visible name it was found
+// under. Ref alone is a directory; Ref+Sub is the file.
+//
+// Falls back to Ref/<name> when Sub is empty, which is the shape every
+// nixgg-produced output has (a drv output dir containing one artifact).
+func (r Result) ArgvPath(name string) string {
+	if r.Sub != "" {
+		return r.Ref + "/" + r.Sub
+	}
+	return r.Ref + "/" + name
 }
 
 // Target classifies a single path.
@@ -124,7 +150,8 @@ func Target(path, altStorePrefix string, l paths.Layout) Result {
 		return Result{Kind: Drv, Ref: canonical}
 	}
 	if strings.HasPrefix(canonical, "/nix/store/") {
-		return Result{Kind: Store, Ref: storeRootOf(canonical)}
+		root, sub := splitStorePath(canonical)
+		return Result{Kind: Store, Ref: root, Sub: sub}
 	}
 	if strings.HasSuffix(dest, ".nix") {
 		return Result{Kind: Thunk, Ref: dest}
@@ -132,15 +159,20 @@ func Target(path, altStorePrefix string, l paths.Layout) Result {
 	return Result{Kind: Regular}
 }
 
-// storeRootOf strips a store subpath down to its /nix/store/<hash>-<name>
-// prefix — the "store root" that gets wrapped in builtins.storePath.
-func storeRootOf(p string) string {
-	// p is /nix/store/<rest>. Keep the first two path components.
+// splitStorePath splits a store path into its /nix/store/<hash>-<name>
+// root — the part `builtins.storePath` and inputs.srcs accept — and the
+// remainder below it.
+//
+// sub is "" when p IS the root, and otherwise the relative path inside
+// it: ("…-zlib", "lib/libz.so") for "…-zlib/lib/libz.so". Callers that
+// put the target on a command line must use root+"/"+sub, not root plus
+// the basename; see Result.Sub.
+func splitStorePath(p string) (root, sub string) {
 	rest := strings.TrimPrefix(p, "/nix/store/")
 	if slash := strings.IndexByte(rest, '/'); slash >= 0 {
-		rest = rest[:slash]
+		return "/nix/store/" + rest[:slash], rest[slash+1:]
 	}
-	return "/nix/store/" + rest
+	return "/nix/store/" + rest, ""
 }
 
 // readlinkFollow returns the final resolved target. We use EvalSymlinks
