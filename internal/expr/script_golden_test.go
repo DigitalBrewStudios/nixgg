@@ -11,42 +11,24 @@ import (
 
 // The drv-script golden test.
 //
-// Both modes get their shell body from ONE place — Go's
-// Derivation.buildScript. Sandbox mode renders it with every store path
-// resolved; native mode renders the same layout with @NIXGG_*@ markers
-// and nix/resolve-script.nix substitutes the values Nix only knows at
-// eval time. These tests pin the seam between those two renderings.
+// Both modes get their shell body from one place — Go's buildScript.
+// Sandbox renders it resolved; native renders the same layout with
+// @NIXGG_*@ markers for nix/resolve-script.nix to fill in. These tests pin
+// the seam:
 //
-// What can still go wrong, and what each test below catches:
+//   - the marker contract desynchronising, which would send a literal
+//     `@NIXGG_INPUT0@` to bash → TestNativeTemplateResolvesToSandboxScript
+//   - the template not being a valid Nix literal, reachable from flags
+//     carrying `''` or `${` → TestScriptTemplateSurvivesNixParsing
+//   - layout regressions → TestScriptEndsWithNewline, plus
+//     TestLinkScriptEmitsLibFlagsAfterInputs in expr_test.go
 //
-//   - The marker contract desynchronises: Go renames a marker, or
-//     resolve-script.nix substitutes a different set. The template would
-//     then reach bash with a literal `@NIXGG_INPUT0@` in argv.
-//     → TestNativeTemplateResolvesToSandboxScript runs the real helper
-//       and demands the result equal script() byte for byte.
+// Cases deliberately cover shapes no pinned fixture contains — that blind
+// spot is how the `'` quoting divergence survived 81 drvs.
 //
-//   - The template is not a valid Nix string literal. Flags carrying a
-//     doubled apostrophe or `${` would produce a thunk that fails to
-//     parse, or worse, silently interpolates at eval time.
-//     → TestScriptTemplateSurvivesNixParsing.
-//
-//   - Layout regressions in the shared code: `-l` ordering, the
-//     lflags==[] fallback that 78 pinned hashes depend on, the trailing
-//     newline.
-//     → TestLinkScriptEmitsLibFlagsAfterInputs (in expr_test.go),
-//       TestScriptEndsWithNewline.
-//
-// The tests that used to live here compared Go's script() against a
-// second, independent implementation inside each .nix helper. That
-// duplication is what this commit deleted, so those comparisons no
-// longer have two sides to compare — they are replaced by the
-// resolves-to test, which is strictly stronger: it proves the native
-// path produces the sandbox bytes rather than proving two hand-synced
-// implementations happen to agree today.
-//
-// Everything runs through `nix-instantiate --eval --raw` reading
-// `drvAttrs.args` — pure eval, ~1s total, no daemon and no store writes.
-// End-to-end drv-hash equality is still tests/drv-equivalence.sh's job.
+// All pure eval via `nix-instantiate --eval --raw` reading drvAttrs.args:
+// ~1s, no daemon, no store writes. End-to-end drv-hash equality remains
+// tests/drv-equivalence.sh's job.
 
 // nixEvalScript renders `helper` with `args` and returns args[1] of the
 // resulting derivation — the bash body. helper is a basename in nix/.

@@ -48,10 +48,10 @@ JSON drv while native mode passes the same text through a thunk for
 eval time. The two modes cannot disagree about flag quoting or
 argument order because there is only one place that decides either.
 
-The end-to-end equivalence is still pinned by
-[tests/drv-equivalence.sh](tests/drv-equivalence.sh), covering four
-fixtures: `hello` (3 drvs), `lua` (37), `fmt` (3), `mosh` (38) —
-every drv matching byte-for-byte between the two modes.
+The end-to-end equivalence is pinned by
+[tests/drv-equivalence.sh](tests/drv-equivalence.sh): 81 drvs across
+four fixtures — `hello` (3), `lua` (37), `fmt` (3), `mosh` (38) — every
+one matching byte-for-byte between the two modes.
 
 ## Use it in your own project
 

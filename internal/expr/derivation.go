@@ -111,33 +111,14 @@ type derivInput struct {
 // output; caching for one call site is fine.
 func outputPlaceholder() string { return "/" + OutPlaceholderNix32 }
 
-// Native mode's script text carries markers in place of values only Nix
-// can supply at eval time.
+// Native mode's script carries markers where only Nix knows the value at
+// eval time: an input may be an unrealised sibling thunk whose drv hash —
+// hence CA output placeholder — doesn't exist yet, and the toolchain roots
+// are the helper's own arguments. nix/resolve-script.nix substitutes them;
+// store context survives replaceStrings, so dependency edges stay intact.
 //
-// Sandbox mode has every store path in hand when it builds the script, so
-// it renders them directly. Native mode does not: an input can be an
-// unrealised sibling thunk whose drv hash — and therefore whose CA output
-// placeholder — does not exist until Nix instantiates it. The toolchain
-// roots are likewise the helper's own arguments.
-//
-// So buildScript emits the full shell layout either way, and native mode
-// leaves markers for nix/resolve-script.nix to fill in with a single
-// `builtins.replaceStrings`. Store context survives that substitution,
-// which is what keeps the drv's dependency edges intact — verified end to
-// end by tests/drv-equivalence.sh.
-//
-// # Collision
-//
-// A marker is just text in a shell script, so a compiler flag containing
-// the same text would be substituted too: `-DAT=@NIXGG_COMPILER@` would
-// reach the compiler as `-DAT=/nix/store/…-gcc-wrapper`. Contrived, but
-// silent, and "our flags never look like that" is exactly the assumption
-// that produced the `'`-quoting divergence.
-//
-// So the tag is chosen per script rather than fixed: markerTag scans the
-// rendered body and picks the first `NIXGG`, `NIXGG1`, `NIXGG2`, … that
-// does not already occur in it. The tag travels to the helper as an
-// argument, so both sides always agree on the spelling in use.
+// The tag is per-script, not fixed. Markers are just text, so a flag
+// spelling one (`-DAT=@NIXGG_COMPILER@`) would be substituted too.
 const markerTagBase = "NIXGG"
 
 // markerTag returns a tag whose markers cannot collide with anything
@@ -471,23 +452,15 @@ func (d *Derivation) envDict() map[string]string {
 	return env
 }
 
-// nixIndentedStringLiteral renders `s` as a Nix indented-string literal
-// (the two-apostrophe form) suitable for embedding in a thunk file.
+// nixIndentedStringLiteral renders `s` as a Nix indented-string literal.
 //
-// Our script templates contain `$`, `"`, `\` and single apostrophes, all
-// of which are literal inside this form. Two constructs are not, and
-// both are reachable from user flags:
-//
-//	a doubled apostrophe  — closes the string; escaped as '''
-//	${                    — starts an interpolation; escaped as ''${
-//
-// A flag carrying an empty single-quoted value, or a literal ${HOME},
-// would otherwise produce a thunk that either fails to parse or silently
+// Two constructs inside that form are not literal, and both are reachable
+// from user flags: a doubled apostrophe closes the string, and `${` opens
+// an interpolation. Unescaped, they give a thunk that won't parse or that
 // interpolates at eval time.
 //
-// Escaping order matters: the apostrophe rule must run first, or it would
-// also rewrite the apostrophes this function itself introduces when
-// escaping `${`.
+// Order matters: the apostrophe rule runs first, or it would also rewrite
+// the apostrophes introduced when escaping `${`.
 func nixIndentedStringLiteral(s string) string {
 	e := strings.ReplaceAll(s, "''", "'''")
 	e = strings.ReplaceAll(e, "${", "''${")

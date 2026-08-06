@@ -164,6 +164,16 @@ run_fixture() {
   # Wipe any pre-existing .nixgg/ that auto-seed might hit.
   rm -rf "$workdir/.nixgg" 2>/dev/null || true
 
+  # "example" is a live working directory, not a pristine store path, so
+  # a stray `make` there leaves main.o / util.o / hello behind. Those are
+  # gitignored (the sandbox never sees them) but this copy is verbatim,
+  # and make would skip both compiles — zero thunks, looking like a nixgg
+  # bug. Use the fixture's own `clean` target so it can't drift from the
+  # build rules. No shims on PATH here, so this deletes and never builds.
+  if [[ -e "$workdir/${subdir}/Makefile" ]]; then
+    ( cd "$workdir/${subdir}" && make clean ) >/dev/null 2>&1 || true
+  fi
+
   # Pull the exact buildCommand the sandbox runs, straight from the
   # flake — no duplication of build recipes in this test.
   local build_cmd
