@@ -73,6 +73,15 @@ type Result struct {
 	// positional `…-zlib-1.3.2/lib/libz.so` became a link against a
 	// nonexistent `…-zlib-1.3.2/libz.so`.
 	Sub string
+	// Err carries the reason a path could not be inspected, when Kind
+	// fell back to Regular because of an Lstat failure rather than
+	// because the file genuinely is an ordinary file nixgg doesn't own.
+	//
+	// Those two cases are behaviourally identical — both passthrough —
+	// but they need different diagnostics. EACCES on a build output or
+	// an ELOOP symlink chain reported as "isn't a nixgg symlink" sends
+	// the reader looking for an ownership problem that isn't there.
+	Err error
 	// ThunkID is set when Kind == Store AND we know which thunk file
 	// produced this output (only populated for promoted regular files
 	// today — a real symlink → /nix/store/... doesn't carry that
@@ -91,6 +100,16 @@ func (r Result) ArgvPath(name string) string {
 		return r.Ref + "/" + r.Sub
 	}
 	return r.Ref + "/" + name
+}
+
+// Reason describes why this classification means "nixgg can't model
+// this input", for use in a passthrough diagnostic. It distinguishes a
+// file nixgg simply doesn't own from one it could not inspect.
+func (r Result) Reason() string {
+	if r.Err != nil {
+		return "stat failed: " + r.Err.Error()
+	}
+	return r.Kind.String()
 }
 
 // Target classifies a single path.
@@ -112,7 +131,10 @@ func Target(path, altStorePrefix string, l paths.Layout) Result {
 		if os.IsNotExist(err) {
 			return Result{Kind: Absent}
 		}
-		return Result{Kind: Regular}
+		// Permission denied, symlink loop, I/O error. Treat as Regular
+		// (passthrough is the safe action) but keep the cause so the
+		// caller can say what actually happened.
+		return Result{Kind: Regular, Err: err}
 	}
 	if info.Mode()&os.ModeSymlink == 0 {
 		// Regular file on disk. Could be:
@@ -133,7 +155,10 @@ func Target(path, altStorePrefix string, l paths.Layout) Result {
 
 	dest, err := readlinkFollow(path)
 	if err != nil {
-		return Result{Kind: Regular}
+		// A symlink we cannot resolve at all: a loop (ELOOP), or a
+		// component we lack permission to traverse. Same shape as the
+		// Lstat failure above — keep the cause.
+		return Result{Kind: Regular, Err: err}
 	}
 
 	// Strip alt-store on-disk prefix to reveal canonical /nix/store/...

@@ -31,18 +31,21 @@ import (
 func Link(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layout) error {
 	realTool := realToolFor(cfg, tool)
 	if bypassed() {
+		logf("link passthrough: NIXGG_BYPASS is set")
 		return Passthrough(realTool, args)
 	}
 	// Refuse compile-family invocations that only *look* like a link.
 	for _, a := range args {
 		switch a {
 		case "-c", "-E", "-S", "-M", "-MM":
+			logf("link passthrough: %s is a compile-family flag", a)
 			return Passthrough(realTool, args)
 		}
 	}
 
 	output, inputs, flags, ok := parseLinkArgs(args)
 	if !ok {
+		logf("link passthrough: unparseable link line (%s)", joinBase(args))
 		return Passthrough(realTool, args)
 	}
 
@@ -70,7 +73,7 @@ func Link(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layo
 				Kind: "drv", Ref: c.Ref, Name: filepath.Base(in),
 			})
 		default:
-			logf("link passthrough: %s isn't a nixgg symlink (%s)", in, c.Kind)
+			logf("link passthrough: can't model input %s (%s)", in, c.Reason())
 			return Passthrough(realTool, args)
 		}
 	}

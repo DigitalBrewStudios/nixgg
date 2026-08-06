@@ -58,11 +58,15 @@ func Compile(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.L
 	// under g++ fails `-std=c99` + designated-initializer parsing).
 	realTool := realToolFor(cfg, tool)
 	if bypassed() {
+		logf("compile passthrough: NIXGG_BYPASS is set")
 		return Passthrough(realTool, args)
 	}
 	source, output, flags, ok := parseCompileArgs(args)
 	if !ok {
-		// Not a single-TU compile; execv the real cc and hope.
+		// Not a single-TU compile; execv the real cc and hope. Say so:
+		// otherwise a build where nothing is accelerated is
+		// indistinguishable from one where everything is.
+		logf("compile passthrough: not a single-TU compile (%s)", joinBase(args))
 		return Passthrough(realTool, args)
 	}
 

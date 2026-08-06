@@ -174,3 +174,94 @@ func TestStoreDirectChildHasNoSub(t *testing.T) {
 		t.Errorf("ArgvPath = %q, want %q", got.ArgvPath("main.o"), want)
 	}
 }
+
+// TestTargetDistinguishesStatFailure pins that a path we could not
+// inspect is reported differently from a path that is genuinely an
+// ordinary file nixgg doesn't own.
+//
+// Both classify as Regular — passthrough is the right action either way
+// — but they need different diagnostics. Reporting an ELOOP symlink
+// chain or an EACCES build output as "isn't a nixgg symlink" points the
+// reader at an ownership question when the real cause is a broken
+// symlink or a permission problem.
+func TestTargetDistinguishesStatFailure(t *testing.T) {
+	dir := t.TempDir()
+
+	t.Run("symlink loop stays Regular, and that is not the Err path", func(t *testing.T) {
+		// a -> b -> a. Worth pinning because it is NOT what it looks
+		// like: EvalSymlinks fails with "too many links", but
+		// readlinkFollow deliberately falls back to os.Readlink, which
+		// succeeds on a loop (it reads one hop without following). So
+		// classification proceeds on the raw target and no error is
+		// ever produced.
+		//
+		// That fallback is load-bearing — it is how an unrealised thunk
+		// symlink still classifies as Thunk — so this is correct
+		// behaviour, not a gap to close. The survey finding that
+		// prompted this test claimed ELOOP reached the Lstat error
+		// path; it does not.
+		a := filepath.Join(dir, "loop-a")
+		b := filepath.Join(dir, "loop-b")
+		if err := os.Symlink(b, a); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(a, b); err != nil {
+			t.Fatal(err)
+		}
+		got := Target(a, "", paths.Layout{})
+		if got.Kind != Regular {
+			t.Errorf("Kind = %v, want Regular — a loop points at nothing nixgg owns", got.Kind)
+		}
+		if got.Err != nil {
+			t.Errorf("Err = %v, want nil: os.Readlink succeeds on a loop, so no "+
+				"error surfaces here. If this ever becomes non-nil, the "+
+				"readlinkFollow fallback changed and thunk symlinks may have "+
+				"stopped resolving.", got.Err)
+		}
+	})
+
+	t.Run("plain file has no Err and reads as regular", func(t *testing.T) {
+		f := filepath.Join(dir, "ordinary.o")
+		if err := os.WriteFile(f, []byte("obj"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		got := Target(f, "", paths.Layout{})
+		if got.Err != nil {
+			t.Errorf("Err = %v, want nil for a readable ordinary file", got.Err)
+		}
+		if got.Reason() != "regular" {
+			t.Errorf("Reason() = %q, want \"regular\"", got.Reason())
+		}
+	})
+
+	t.Run("unreadable directory yields Err, not a bare regular", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("root bypasses permission checks")
+		}
+		locked := filepath.Join(dir, "locked")
+		if err := os.MkdirAll(locked, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		victim := filepath.Join(locked, "hidden.o")
+		if err := os.WriteFile(victim, []byte("obj"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		// Remove search permission so Lstat on the child fails EACCES.
+		if err := os.Chmod(locked, 0o000); err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = os.Chmod(locked, 0o755) })
+
+		got := Target(victim, "", paths.Layout{})
+		if got.Kind != Regular {
+			t.Errorf("Kind = %v, want Regular (passthrough is still correct)", got.Kind)
+		}
+		if got.Err == nil {
+			t.Fatal("Err is nil — an EACCES path is indistinguishable from an " +
+				"ordinary unowned file, so the diagnostic misattributes the cause")
+		}
+		if r := got.Reason(); !strings.Contains(r, "stat failed") {
+			t.Errorf("Reason() = %q, want it to mention the stat failure", r)
+		}
+	})
+}

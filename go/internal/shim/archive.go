@@ -27,10 +27,16 @@ import (
 // with the caller's exact intent.
 func Archive(args []string, cfg *toolchain.Config, l paths.Layout) error {
 	if bypassed() {
+		logf("ar passthrough: NIXGG_BYPASS is set")
 		return Passthrough(realARFor(cfg), args)
 	}
 	modifiers, archive, inputs, ok := parseARArgs(args)
 	if !ok {
+		// Read-mode invocations (ar t/p/x) land here, as does anything
+		// whose modifier string we don't model. Both are fine to pass
+		// through — but silence here means a build that accelerated
+		// nothing looks exactly like one that accelerated everything.
+		logf("ar passthrough: not an archive-creating invocation (%s)", joinBase(args))
 		return Passthrough(realARFor(cfg), args)
 	}
 
@@ -55,7 +61,7 @@ func Archive(args []string, cfg *toolchain.Config, l paths.Layout) error {
 				Kind: "drv", Ref: c.Ref, Name: filepath.Base(in),
 			})
 		default:
-			logf("ar passthrough: %s isn't a nixgg symlink (%s)", in, c.Kind)
+			logf("ar passthrough: can't model input %s (%s)", in, c.Reason())
 			return Passthrough(realARFor(cfg), args)
 		}
 	}
