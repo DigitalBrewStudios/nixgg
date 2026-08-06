@@ -88,23 +88,27 @@ func Link(p LinkParams) string {
 
 func linkDerivation(p LinkParams) *Derivation {
 	return &Derivation{
-		Kind:       KindLink,
-		Tool:       p.Tool,
-		OutName:    p.OutName,
-		Inputs:     inputsToDeriv(p.Inputs),
-		Flags:      p.Flags,
-		StoreDeps:  decodeStringArray(p.StoreDepsJSON),
-		WrapperEnv: decodeStringObject(p.WrapperEnvJSON),
+		Kind:        KindLink,
+		Tool:        p.Tool,
+		OutName:     p.OutName,
+		Inputs:      inputsToDeriv(p.Inputs),
+		Flags:       p.Flags,
+		GroupInputs: p.GroupInputs,
+		StoreDeps:   decodeStringArray(p.StoreDepsJSON),
+		WrapperEnv:  decodeStringObject(p.WrapperEnvJSON),
 	}
 }
 
 // LinkParams is the input for one link expression.
 type LinkParams struct {
-	Helpers        string
-	Tool           string
-	OutName        string
-	Inputs         []Input
-	Flags          []string
+	Helpers string
+	Tool    string
+	OutName string
+	Inputs  []Input
+	Flags   []string
+	// GroupInputs wraps the input list in --start-group/--end-group.
+	// See Derivation.GroupInputs.
+	GroupInputs    bool
 	StoreDepsJSON  string
 	WrapperEnvJSON string
 }
@@ -167,7 +171,7 @@ type Input struct {
 }
 
 // jsonArrayIndented renders a []string as a pretty JSON array. This is
-// what the bash driver used to embed inside a ''...'' Nix string. The
+// what the bash driver used to embed inside a ”...” Nix string. The
 // indentation matches so thunk IDs are stable across the rewrite.
 func jsonArrayIndented(items []string) string {
 	if len(items) == 0 {
@@ -268,19 +272,19 @@ type JSONOut struct {
 // caller has already `nix store add`ed the staged src tree and put
 // it in Inputs.Srcs.
 type CompileJSONParams struct {
-	Name        string            // derivation name, e.g. "tu-foo.o" — no .drv suffix
-	OutName     string            // "foo.o"; the builder writes to $out/<outName>
-	System      string            // "x86_64-linux"
-	Bash        string            // full /nix/store/... path to bash (for builder)
-	Coreutils   string            // full /nix/store/... path to coreutils (added to PATH)
-	Compiler    string            // full /nix/store/... path to gcc-wrapper (added to PATH)
-	Tool        string            // "cc", "g++", etc.
-	SrcStore    string            // full /nix/store/... path to the staged src tree
-	Source      string            // relative path inside SrcStore, e.g. "src/foo.c"
-	Flags       []string          // compile flags
-	StoreDeps   []string          // full /nix/store/... roots referenced by flags/env — same as
-	                              // native's storeDepsJSON, flattened to colon-separated for the
-	                              // _storeDeps env var (matches builder.nix).
+	Name      string   // derivation name, e.g. "tu-foo.o" — no .drv suffix
+	OutName   string   // "foo.o"; the builder writes to $out/<outName>
+	System    string   // "x86_64-linux"
+	Bash      string   // full /nix/store/... path to bash (for builder)
+	Coreutils string   // full /nix/store/... path to coreutils (added to PATH)
+	Compiler  string   // full /nix/store/... path to gcc-wrapper (added to PATH)
+	Tool      string   // "cc", "g++", etc.
+	SrcStore  string   // full /nix/store/... path to the staged src tree
+	Source    string   // relative path inside SrcStore, e.g. "src/foo.c"
+	Flags     []string // compile flags
+	StoreDeps []string // full /nix/store/... roots referenced by flags/env — same as
+	// native's storeDepsJSON, flattened to colon-separated for the
+	// _storeDeps env var (matches builder.nix).
 	Placeholder string            // builtins.placeholder "out" for this drv
 	Srcs        []string          // basenames for inputs.srcs — bash, coreutils, compiler, srcStore
 	Env         map[string]string // extra env (NIX_CFLAGS_COMPILE etc.); merged over defaults
@@ -322,7 +326,8 @@ type LinkJSONParams struct {
 	Tool        string
 	Inputs      []JSONDrvInput // per-input drv or store-path reference
 	Flags       []string
-	StoreDeps   []string          // full /nix/store/... roots referenced; joined into _storeDeps env
+	GroupInputs bool     // wrap inputs in --start-group/--end-group
+	StoreDeps   []string // full /nix/store/... roots referenced; joined into _storeDeps env
 	Placeholder string
 	ExtraSrcs   []string          // additional basenames for inputs.srcs (bash, coreutils, compiler)
 	Env         map[string]string // wrapper env
@@ -381,18 +386,19 @@ func ArchiveJSON(p ArchiveJSONParams) JSONDrv {
 // Derivation for env/script shape.
 func LinkJSON(p LinkJSONParams) JSONDrv {
 	d := &Derivation{
-		Kind:       KindLink,
-		Name:       p.Name,
-		System:     p.System,
-		Bash:       p.Bash,
-		Coreutils:  p.Coreutils,
-		Compiler:   p.Compiler,
-		Tool:       p.Tool,
-		OutName:    p.OutName,
-		Inputs:     inputsFromJSON(p.Inputs),
-		Flags:      p.Flags,
-		StoreDeps:  p.StoreDeps,
-		WrapperEnv: p.Env,
+		Kind:        KindLink,
+		Name:        p.Name,
+		System:      p.System,
+		Bash:        p.Bash,
+		Coreutils:   p.Coreutils,
+		Compiler:    p.Compiler,
+		Tool:        p.Tool,
+		OutName:     p.OutName,
+		Inputs:      inputsFromJSON(p.Inputs),
+		Flags:       p.Flags,
+		GroupInputs: p.GroupInputs,
+		StoreDeps:   p.StoreDeps,
+		WrapperEnv:  p.Env,
 	}
 	return d.toJSON(p.ExtraSrcs, nil)
 }

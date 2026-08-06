@@ -74,6 +74,20 @@ type Derivation struct {
 	// Link + Compile: compiler flags. Archive uses ARFlags instead.
 	Flags []string
 
+	// GroupInputs wraps the input list in --start-group/--end-group.
+	//
+	// Set when the caller's link line had those brackets. They cannot be
+	// carried in Flags: they are positional — they bracket whatever sits
+	// BETWEEN them — and buildScript emits all flags before all inputs,
+	// which would leave the pair adjacent, spanning nothing, silently
+	// defeating ld's multi-pass rescan for circular archive deps.
+	//
+	// The re-emitted group spans every input rather than the caller's
+	// exact original span. Widening is safe (objects inside a group are
+	// harmless, verified against ld) and the narrow span is not
+	// expressible once inputs and flags have been separated.
+	GroupInputs bool
+
 	// Archive-only: `ar` modifier string (e.g. "rcs").
 	ARFlags string
 
@@ -233,20 +247,27 @@ cd "$src"
 				nonLflags = append(nonLflags, f)
 			}
 		}
+		// Re-emit the archive group around the whole input list. Only
+		// reached when the caller asked for it, so the no-group layout
+		// below stays byte-identical for every existing derivation.
+		inputList := inputs()
+		if d.GroupInputs && inputList != "" {
+			inputList = "-Wl,--start-group " + inputList + " -Wl,--end-group"
+		}
 		if len(lflags) == 0 {
 			return fmt.Sprintf(
 				`set -euo pipefail
 %s
 mkdir -p "$out"
 "%s" %s %s -o "$out/%s"
-`, pathPrefix, d.Tool, shellQuoteFlags(d.Flags), inputs(), d.OutName)
+`, pathPrefix, d.Tool, shellQuoteFlags(d.Flags), inputList, d.OutName)
 		}
 		return fmt.Sprintf(
 			`set -euo pipefail
 %s
 mkdir -p "$out"
 "%s" %s %s %s -o "$out/%s"
-`, pathPrefix, d.Tool, shellQuoteFlags(nonLflags), inputs(), shellQuoteFlags(lflags), d.OutName)
+`, pathPrefix, d.Tool, shellQuoteFlags(nonLflags), inputList, shellQuoteFlags(lflags), d.OutName)
 	case KindArchive:
 		// `ar` is taken from PATH (set above) and `D` is prepended to
 		// arFlags for a deterministic archive.

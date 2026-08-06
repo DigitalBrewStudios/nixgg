@@ -473,3 +473,80 @@ func TestMarkerTagAvoidsCollisionWithFlagText(t *testing.T) {
 		}
 	})
 }
+
+// TestLinkScriptGroupWrapsInputs pins where the re-emitted archive group
+// lands in the generated command, and that the no-group case is unchanged.
+//
+// The second half matters as much as the first: GroupInputs is false for
+// every one of the 81 pinned drvs, so if setting it false ever altered the
+// layout, every pinned hash would move.
+func TestLinkScriptGroupWrapsInputs(t *testing.T) {
+	mk := func(group bool, flags []string) *Derivation {
+		return &Derivation{
+			Kind: KindLink, Tool: "cc", OutName: "prog",
+			Coreutils: fakeCoreutils, Compiler: fakeCompiler, Bash: fakeBash,
+			Flags: flags, GroupInputs: group,
+			Inputs: []derivInput{
+				{InputKind: "store", Ref: fakeObj, Name: "main.o"},
+				{InputKind: "store", Ref: fakeArchive, Name: "libx.a"},
+			},
+		}
+	}
+
+	t.Run("group brackets the inputs, not the flags", func(t *testing.T) {
+		s := mk(true, []string{"-O2"}).script()
+		start := strings.Index(s, "-Wl,--start-group")
+		end := strings.Index(s, "-Wl,--end-group")
+		firstIn := strings.Index(s, "main.o'")
+		lastIn := strings.LastIndex(s, "libx.a'")
+		if start < 0 || end < 0 {
+			t.Fatalf("group brackets missing:\n%s", s)
+		}
+		if !(start < firstIn && lastIn < end) {
+			t.Errorf("group does not span the inputs (start=%d firstIn=%d lastIn=%d end=%d)\n%s",
+				start, firstIn, lastIn, end, s)
+		}
+		// A group spanning nothing is the exact bug being fixed.
+		if end < firstIn {
+			t.Errorf("--end-group precedes the first input — the group spans "+
+				"nothing and ld's rescan is defeated:\n%s", s)
+		}
+	})
+
+	t.Run("group coexists with the -l split", func(t *testing.T) {
+		// -l flags go after the inputs; they must land outside the group,
+		// since the group is about archive rescanning among the inputs.
+		s := mk(true, []string{"-O2", "-lm"}).script()
+		end := strings.Index(s, "-Wl,--end-group")
+		lm := strings.Index(s, "'-lm'")
+		if end < 0 || lm < 0 {
+			t.Fatalf("expected both a group and -lm:\n%s", s)
+		}
+		if lm < end {
+			t.Errorf("-lm landed inside the group; it belongs after it:\n%s", s)
+		}
+	})
+
+	t.Run("no group is byte-identical to before", func(t *testing.T) {
+		// Pins that GroupInputs=false changes nothing. All 81 pinned drvs
+		// depend on this.
+		s := mk(false, []string{"-O2"}).script()
+		if strings.Contains(s, "start-group") || strings.Contains(s, "end-group") {
+			t.Errorf("group emitted without being asked for:\n%s", s)
+		}
+		if strings.Contains(s, "  ") {
+			t.Errorf("double space in the no-group script — layout drifted and "+
+				"every pinned drv hash would move:\n%q", s)
+		}
+	})
+
+	t.Run("group with no inputs emits no brackets", func(t *testing.T) {
+		d := mk(true, []string{"-O2"})
+		d.Inputs = nil
+		s := d.script()
+		if strings.Contains(s, "start-group") {
+			t.Errorf("empty group emitted; ld would see --start-group --end-group "+
+				"around nothing:\n%s", s)
+		}
+	})
+}

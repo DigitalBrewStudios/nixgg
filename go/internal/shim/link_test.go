@@ -89,7 +89,7 @@ func TestParseLinkArgs(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			out, inputs, flags, ok := parseLinkArgs(tc.args)
+			out, inputs, flags, _, ok := parseLinkArgs(tc.args)
 			if ok != tc.wantOK {
 				t.Fatalf("ok = %v, want %v", ok, tc.wantOK)
 			}
@@ -211,7 +211,7 @@ func TestIsLinkInput(t *testing.T) {
 // library reaches `inputs`, not `flags`. As a flag it would be baked
 // into the drv as a bare path with no corresponding staged file.
 func TestParseLinkArgsSharedLibIsAnInput(t *testing.T) {
-	_, inputs, flags, ok := parseLinkArgs(
+	_, inputs, flags, _, ok := parseLinkArgs(
 		[]string{"main.o", "libfoo.so", "libbar.so.1.2", "-o", "prog"})
 	if !ok {
 		t.Fatal("parseLinkArgs returned !ok")
@@ -418,4 +418,97 @@ func TestResolveLibFlagFindsSharedLibs(t *testing.T) {
 			t.Errorf("resolveLibFlag claimed a foreign .so: %q", got)
 		}
 	})
+}
+
+// TestParseLinkArgsPreservesArchiveGroup pins that a linker archive group
+// survives the input/flag separation.
+//
+// parseLinkArgs sorts tokens into inputs and flags, and buildScript emits
+// all flags before all inputs. Group brackets are positional — they
+// bracket whatever sits BETWEEN them — so the pair ended up adjacent in
+// flags, spanning nothing:
+//
+//	caller:  cc m.o -Wl,--start-group libb.a liba.a -Wl,--end-group -o p
+//	emitted: cc -Wl,--start-group -Wl,--end-group m.o libb.a liba.a -o p
+//
+// That silently defeats ld's multi-pass rescan. Reproduced against the
+// real linker with two mutually-recursive archives: with the group it
+// links, without it fails with `undefined reference to b_fn`.
+//
+// The fix records that a group was asked for and re-emits it around the
+// whole input list. That widens the span — objects end up inside the
+// group, which is harmless (also verified against ld) — because the
+// caller's exact span is no longer expressible once inputs and flags have
+// been separated.
+func TestParseLinkArgsPreservesArchiveGroup(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		args       []string
+		wantGroup  bool
+		wantInputs []string
+		wantFlags  []string
+	}{
+		{
+			name: "long spelling",
+			args: []string{"m.o", "-Wl,--start-group", "libb.a", "liba.a",
+				"-Wl,--end-group", "-o", "prog"},
+			wantGroup:  true,
+			wantInputs: []string{"m.o", "libb.a", "liba.a"},
+			wantFlags:  nil,
+		},
+		{
+			// ld accepts -Wl,-( / -Wl,-) as equivalent; verified.
+			name: "paren spelling",
+			args: []string{"m.o", "-Wl,-(", "libb.a", "liba.a", "-Wl,-)",
+				"-o", "prog"},
+			wantGroup:  true,
+			wantInputs: []string{"m.o", "libb.a", "liba.a"},
+			wantFlags:  nil,
+		},
+		{
+			name:       "bare spelling, no -Wl prefix",
+			args:       []string{"m.o", "--start-group", "liba.a", "--end-group", "-o", "prog"},
+			wantGroup:  true,
+			wantInputs: []string{"m.o", "liba.a"},
+			wantFlags:  nil,
+		},
+		{
+			name:       "no group leaves the flag list untouched",
+			args:       []string{"m.o", "liba.a", "-O2", "-o", "prog"},
+			wantGroup:  false,
+			wantInputs: []string{"m.o", "liba.a"},
+			wantFlags:  []string{"-O2"},
+		},
+		{
+			name: "other flags still pass through alongside a group",
+			args: []string{"-O2", "m.o", "-Wl,--start-group", "liba.a",
+				"-Wl,--end-group", "-Wl,-E", "-o", "prog"},
+			wantGroup:  true,
+			wantInputs: []string{"m.o", "liba.a"},
+			wantFlags:  []string{"-O2", "-Wl,-E"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, inputs, flags, group, ok := parseLinkArgs(tc.args)
+			if !ok {
+				t.Fatalf("parseLinkArgs failed on %q", tc.args)
+			}
+			if group != tc.wantGroup {
+				t.Errorf("group = %v, want %v", group, tc.wantGroup)
+			}
+			if !reflect.DeepEqual(inputs, tc.wantInputs) {
+				t.Errorf("inputs = %q, want %q", inputs, tc.wantInputs)
+			}
+			if !reflect.DeepEqual(flags, tc.wantFlags) {
+				t.Errorf("flags = %q, want %q", flags, tc.wantFlags)
+			}
+			// The brackets must not survive in flags: that is the bug.
+			for _, f := range flags {
+				if isGroupBracket(f) {
+					t.Errorf("group bracket %q left in flags — it would be emitted "+
+						"before the inputs and span nothing", f)
+				}
+			}
+		})
+	}
 }

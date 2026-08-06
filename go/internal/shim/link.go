@@ -43,7 +43,7 @@ func Link(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layo
 		}
 	}
 
-	output, inputs, flags, ok := parseLinkArgs(args)
+	output, inputs, flags, group, ok := parseLinkArgs(args)
 	if !ok {
 		logf("link passthrough: unparseable link line (%s)", joinBase(args))
 		return Passthrough(realTool, args)
@@ -86,7 +86,7 @@ func Link(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layo
 
 	// Sandbox mode: emit JSON, submit as this outer derivation's output.
 	if sandbox.Enabled() {
-		return linkSandbox(cfg, tool, output, jsonInputs, flags, storeDeps, wrapperEnvJSON)
+		return linkSandbox(cfg, tool, output, jsonInputs, flags, group, storeDeps, wrapperEnvJSON)
 	}
 
 	e := expr.Link(expr.LinkParams{
@@ -95,6 +95,7 @@ func Link(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layo
 		OutName:        filepath.Base(output),
 		Inputs:         linkInputs,
 		Flags:          flags,
+		GroupInputs:    group,
 		StoreDepsJSON:  storedeps.AsJSONArray(storeDeps),
 		WrapperEnvJSON: wrapperEnvJSON,
 	})
@@ -141,7 +142,19 @@ func Link(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layo
 // (`-Llibavcodec -lavcodec` instead of `libavcodec/libavcodec.a`)
 // and the drv otherwise fails at ld with "cannot find -lavcodec"
 // because the produced `.a` isn't on the sandbox's link path.
-func parseLinkArgs(args []string) (output string, inputs, flags []string, ok bool) {
+// isGroupBracket reports whether a token opens or closes a linker
+// archive group. Both spellings ld accepts are handled; verified that
+// `-Wl,-(` / `-Wl,-)` link the same circular case as the long form.
+func isGroupBracket(a string) bool {
+	switch a {
+	case "-Wl,--start-group", "-Wl,--end-group", "-Wl,-(", "-Wl,-)",
+		"--start-group", "--end-group":
+		return true
+	}
+	return false
+}
+
+func parseLinkArgs(args []string) (output string, inputs, flags []string, group, ok bool) {
 	var libDirs []string
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -154,6 +167,15 @@ func parseLinkArgs(args []string) (output string, inputs, flags []string, ok boo
 			i++
 		case strings.HasPrefix(a, "-o") && len(a) > 2:
 			output = a[2:]
+		// Group brackets are positional: they bracket the inputs
+		// BETWEEN them, and our reassembly emits all flags before all
+		// inputs, which would leave the pair spanning nothing. Record
+		// that a group was requested and re-emit it around the whole
+		// input list instead. Objects inside a group are harmless
+		// (verified against ld), so widening the span is safe where
+		// preserving the exact original span is not expressible.
+		case isGroupBracket(a):
+			group = true
 		case isLinkInput(a):
 			inputs = append(inputs, a)
 		case strings.HasPrefix(a, "-L") && len(a) > 2:
@@ -193,9 +215,9 @@ func parseLinkArgs(args []string) (output string, inputs, flags []string, ok boo
 		}
 	}
 	if len(inputs) == 0 || output == "" {
-		return "", nil, nil, false
+		return "", nil, nil, false, false
 	}
-	return output, inputs, flags, true
+	return output, inputs, flags, group, true
 }
 
 // resolveLibFlag checks whether any -L directory contains a
@@ -362,6 +384,7 @@ func linkSandbox(
 	output string,
 	inputs []expr.JSONDrvInput,
 	flags []string,
+	group bool,
 	storeDeps []string,
 	wrapperEnvJSON string,
 ) error {
@@ -380,6 +403,7 @@ func linkSandbox(
 		Tool:        tool.Basename(),
 		Inputs:      inputs,
 		Flags:       flags,
+		GroupInputs: group,
 		StoreDeps:   storeDeps,
 		Placeholder: "/" + expr.OutPlaceholderNix32,
 		ExtraSrcs: []string{
