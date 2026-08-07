@@ -51,9 +51,9 @@ export NIXGG_AUTOFORCE=1        # optional; link shim realises inline
 make -j$(nproc)
 
 # sandbox / dyn-drv mode — via flake
-nix build .#hello               # produces bin-hello/hello ELF
-nix build .#lua                 # produces bin-lua/lua ELF (Lua 5.4.7)
-nix build .#fmt                 # produces libfmt.a
+nix build .#hello               # produces bin-hello/bin/hello ELF
+nix build .#lua                 # produces bin-lua/bin/lua ELF (Lua 5.4.7)
+nix build .#fmt                 # produces ar-libfmt.a/lib/libfmt.a
 nix build .#mosh                # produces mosh-server ELF
 ```
 
@@ -367,6 +367,50 @@ realise synchronously. Purely filename-driven, no env var:
   TryCompile scratch dirs.
 
 Every pattern here was added because a real project tripped it.
+
+## Output layout (FHS)
+
+Artifacts land where the rest of the Nix ecosystem expects them:
+
+```
+bin-mosh-server/bin/mosh-server     link outputs  -> $out/bin/
+ar-libiberty.a/lib/libiberty.a      ar outputs    -> $out/lib/
+tu-regex.o/regex.o                  compile outputs stay FLAT
+```
+
+The first two matter because a store path's internal layout is what
+makes it installable. `nix profile install`, `nix run`, `buildEnv` /
+`symlinkJoin`, and NixOS's `environment.systemPackages` all locate
+artifacts by scanning `bin/`, `lib/`, `share/` and friends. An
+executable sitting flat at `$out/<name>` is invisible to every one of
+them, so before this a nixgg-built program could not be installed the
+way any other Nix package can.
+
+Compile outputs deliberately stay flat. A per-TU output holding one `.o`
+is not a package and has no FHS home, and relocating it would rewrite
+every sibling reference — churning every drv hash in the project to move
+files nothing user-facing ever reads. Concretely: the FHS change moved
+link and archive hashes but left all 67 of gcc's `tu-*` drvs
+byte-identical, so they stayed cached across it.
+
+Producer and consumer decide placement separately, because each knows
+only half of what is needed:
+
+- `Derivation.outSubdir` (producer) keys on `Kind` — it knows it is a
+  link or an archive.
+- `inputSubdirFor` (consumer) keys on the artifact's **filename** —
+  `.a` → `lib`, `.o` → flat, anything else → `bin`.
+
+The consumer side must key on the filename rather than on the producing
+derivation's name, and that is load-bearing rather than incidental: in
+sandbox mode a sibling reference is a drv path (`…-ar-libfoo.a.drv`,
+kind legible) but in native mode it is a thunk path
+(`.nixgg/thunks/<hash>.nix`, kind absent). Inferring from the drv name
+resolves to `lib` in one mode and `""` in the other for the same input,
+which emits different scripts and different drv hashes — exactly the
+invariant break this project cannot tolerate. Two tests pin this:
+`TestOutSubdirAgreesWithInputSubdirFor` and
+`TestInputSubdirForIsModeIndependent`.
 
 ## What every CA hash includes
 

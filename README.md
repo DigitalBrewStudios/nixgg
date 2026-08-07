@@ -99,7 +99,7 @@ that does not exist on your real filesystem, because the artifact lives
 under the alt-store root. Read it there instead:
 
 ```sh
-/tmp/incremental/nix/store/…-bin-hello/hello
+/tmp/incremental/nix/store/…-bin-hello/bin/hello
 ```
 
 ## Use it in your own project

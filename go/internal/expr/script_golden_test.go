@@ -550,3 +550,114 @@ func TestLinkScriptGroupWrapsInputs(t *testing.T) {
 		}
 	})
 }
+
+// TestOutSubdirAgreesWithInputSubdirFor pins the producer/consumer
+// contract for FHS placement.
+//
+// outSubdir decides where a derivation WRITES its artifact, keyed on Kind.
+// inputSubdirFor decides where a downstream derivation LOOKS for it, keyed
+// on the artifact's filename. They are separate functions because each
+// side has only one of those two facts — the producer knows its Kind, the
+// consumer sees only a filename. If they disagree, a link reaches for an
+// archive at a path the archive drv never wrote.
+func TestOutSubdirAgreesWithInputSubdirFor(t *testing.T) {
+	for _, tc := range []struct {
+		kind Kind
+		name string
+	}{
+		{KindCompile, "main.o"},
+		{KindCompile, "sub/dir/main.o"},
+		{KindArchive, "libfoo.a"},
+		{KindArchive, "libLLVMSupport.a"},
+		{KindLink, "prog"},
+		{KindLink, "mosh-server"},
+		{KindLink, "llc"},
+		// A shared library is a link output; bin/ is where the link drv
+		// puts whatever it was told to produce.
+		{KindLink, "libfoo.so"},
+	} {
+		producer := (&Derivation{Kind: tc.kind, OutName: tc.name}).outSubdir()
+		consumer := inputSubdirFor(tc.name)
+		if producer != consumer {
+			t.Errorf("kind=%v name=%q: producer writes to %q but a consumer would "+
+				"look in %q — the reference would dangle",
+				tc.kind, tc.name, producer, consumer)
+		}
+	}
+}
+
+// TestInputSubdirForIsModeIndependent pins that the subdir is derived from
+// something BOTH modes have.
+//
+// Sandbox references a sibling by drv path ("…-ar-libfoo.a.drv"); native
+// references it by thunk path (".nixgg/thunks/<hash>.nix"), which encodes
+// no kind whatsoever. An earlier version of this keyed on the drv name and
+// therefore resolved to "lib" in sandbox mode and "" in native mode for
+// the same input — different scripts, different drv hashes, invariant
+// broken. Keying on the artifact filename is what makes the two agree.
+func TestInputSubdirForIsModeIndependent(t *testing.T) {
+	for _, name := range []string{"libfoo.a", "main.o", "prog"} {
+		want := inputSubdirFor(name)
+		// Whatever wrapping either mode applies, the answer must not move.
+		for _, ref := range []string{
+			name,
+			"/nix/store/" + strings.Repeat("a", 32) + "-ar-" + name + ".drv",
+			"/abs/path/.nixgg/thunks/deadbeef.nix",
+		} {
+			_ = ref // the point: we do NOT consult the ref at all
+		}
+		if got := inputSubdirFor("/some/dir/" + name); got != want {
+			t.Errorf("inputSubdirFor is sensitive to the leading path: %q vs %q", got, want)
+		}
+	}
+	if inputSubdirFor("libfoo.a") != "lib" {
+		t.Error("archives must resolve to lib/")
+	}
+	if inputSubdirFor("main.o") != "" {
+		t.Error("compile outputs must stay flat")
+	}
+	if inputSubdirFor("prog") != "bin" {
+		t.Error("executables must resolve to bin/")
+	}
+}
+
+// TestScriptCreatesTheDirectoryItWritesTo pins that every emitted script
+// mkdir's the directory it then writes into.
+//
+// Without this, moving an artifact into $out/bin while still creating only
+// $out produces a script that fails at BUILD time — `gcc -o $out/bin/prog`
+// with no $out/bin — which no unit test would notice and which surfaces as
+// a compiler error deep in a Nix build log. Mutation-caught: dropping the
+// subdir from outDir() passed every other test here.
+func TestScriptCreatesTheDirectoryItWritesTo(t *testing.T) {
+	for _, d := range []*Derivation{
+		{Kind: KindCompile, Tool: "cc", Coreutils: "/C", Compiler: "/G",
+			Source: "a.c", OutName: "a.o"},
+		{Kind: KindLink, Tool: "cc", Coreutils: "/C", Compiler: "/G",
+			OutName: "prog", Flags: []string{"-O2"}},
+		{Kind: KindLink, Tool: "cc", Coreutils: "/C", Compiler: "/G",
+			OutName: "prog", Flags: []string{"-lm"}}, // the other branch
+		{Kind: KindArchive, Coreutils: "/C", AR: "/AR",
+			OutName: "libfoo.a", ARFlags: "rcs"},
+	} {
+		s := d.script()
+		// The directory the script creates.
+		var made string
+		for _, line := range strings.Split(s, "\n") {
+			if strings.HasPrefix(line, "mkdir -p ") {
+				made = strings.Trim(strings.TrimPrefix(line, "mkdir -p "), `"`)
+			}
+		}
+		if made == "" {
+			t.Fatalf("kind %d: no mkdir in script:\n%s", d.Kind, s)
+		}
+		// The directory the artifact is written into.
+		want := d.outPath()
+		wantDir := want[:strings.LastIndexByte(want, '/')]
+		if made != wantDir {
+			t.Errorf("kind %d: script creates %q but writes to %q — the build "+
+				"fails with a missing-directory error, not a test failure:\n%s",
+				d.Kind, made, want, s)
+		}
+	}
+}

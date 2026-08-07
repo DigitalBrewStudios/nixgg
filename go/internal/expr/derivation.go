@@ -115,8 +115,45 @@ type derivInput struct {
 	// Ref: for "store", a canonical /nix/store/<hash>-<name> root;
 	// for "nix", the absolute path to the sibling drv/thunk.
 	Ref string
-	// Name: the basename inside that ref's output dir (e.g. "foo.o").
+	// Name: the path of the artifact relative to that ref's output dir.
+	// Usually a basename ("foo.o"), but carries a subdirectory when the
+	// producing derivation puts its artifact under one — see
+	// inputSubdirFor.
 	Name string
+}
+
+// inputSubdirFor returns the FHS subdirectory a sibling derivation's
+// artifact sits in, inferred from the artifact's own filename.
+//
+// Producer and consumer are separate derivations built at different
+// times, so the agreement between them cannot be passed along — it has
+// to be derivable identically on both sides. The filename is the only
+// thing both sides reliably share:
+//
+//	*.a          -> lib   (an ar drv wrote it to $out/lib/)
+//	*.o          -> ""    (compile outputs stay flat)
+//	anything else-> bin   (a link drv wrote it to $out/bin/)
+//
+// Keying on the filename rather than on the producing drv's NAME is
+// deliberate and load-bearing. In sandbox mode a sibling reference is a
+// drv path ("…-ar-libfoo.a.drv") whose kind is legible; in native mode it
+// is a thunk path (".nixgg/thunks/<hash>.nix") that carries no kind at
+// all. Inferring from the drv name would therefore resolve to "lib" in
+// sandbox mode and "" in native mode for the same input — the two would
+// emit different scripts and produce different drv hashes, breaking the
+// one invariant this project rests on.
+func inputSubdirFor(name string) string {
+	base := name
+	if i := strings.LastIndexByte(base, '/'); i >= 0 {
+		base = base[i+1:]
+	}
+	switch {
+	case strings.HasSuffix(base, ".o"):
+		return ""
+	case strings.HasSuffix(base, ".a"):
+		return "lib"
+	}
+	return "bin"
 }
 
 // outputPlaceholder returns the `builtins.placeholder "out"` value —
@@ -177,6 +214,57 @@ func (d *Derivation) scriptTemplate() (template, tag string) {
 	return d.buildScript(tag, coreutilsMarker(tag), compilerMarker(tag)), tag
 }
 
+// outSubdir is the FHS directory inside $out that this Kind's artifact
+// belongs in, "" for none.
+//
+// Nix store paths follow the FHS internally: an executable lives at
+// $out/bin/<name>, a library at $out/lib/<name>. That is not decoration
+// — it is what makes a store path installable. `nix profile install`,
+// `nix run`, buildEnv/symlinkJoin and NixOS's environment.systemPackages
+// all locate artifacts by scanning bin/, lib/, share/ and friends. A
+// binary sitting flat at $out/<name> is invisible to every one of them,
+// so a nixgg-built program could not be installed the way any other Nix
+// package can.
+//
+// Compile outputs stay flat, deliberately. A per-TU output holding one
+// .o is not a package and has no FHS home; relocating it would rewrite
+// every sibling reference and every drv hash in the project to move
+// files nothing user-facing ever reads. FHS matters exactly where an
+// output is consumed by a person or by Nix's own tooling.
+func (d *Derivation) outSubdir() string {
+	switch d.Kind {
+	case KindLink:
+		return "bin"
+	case KindArchive:
+		return "lib"
+	}
+	return ""
+}
+
+// The producer side (outSubdir, keyed on Kind) and the consumer side
+// (inputSubdirFor, keyed on the artifact filename) must agree for every
+// artifact nixgg produces, or a link would look for an archive somewhere
+// the archive drv never wrote it. They are separate functions because
+// each side only has one of those two pieces of information.
+// TestOutSubdirAgreesWithInputSubdirFor pins the agreement.
+
+// outPath renders the artifact's destination inside the builder, e.g.
+// `$out/bin/llc`. Callers embed this directly in the shell script.
+func (d *Derivation) outPath() string {
+	if sub := d.outSubdir(); sub != "" {
+		return "$out/" + sub + "/" + d.OutName
+	}
+	return "$out/" + d.OutName
+}
+
+// outDir renders the directory the builder must create first.
+func (d *Derivation) outDir() string {
+	if sub := d.outSubdir(); sub != "" {
+		return "$out/" + sub
+	}
+	return "$out"
+}
+
 // compilerOrAR reports which store path provides the tools on PATH.
 // Compile and Link use the compiler; Archive uses whatever supplies
 // `ar` — which native mode passes as compilerRoot and sandbox mode as
@@ -212,8 +300,14 @@ func (d *Derivation) buildScript(tag, coreutils, compiler string) string {
 				}
 				parts = append(parts, fmt.Sprintf("'%s/%s'", ref, in.Name))
 			case "nix":
+				// A sibling drv we reference. Its artifact sits under the
+				// FHS subdir its own Kind implies, so reach it there.
+				name := in.Name
+				if sub := inputSubdirFor(in.Name); sub != "" {
+					name = sub + "/" + name
+				}
 				parts = append(parts,
-					fmt.Sprintf("'%s/%s'", caOutputPlaceholder(in.Ref, "out"), in.Name))
+					fmt.Sprintf("'%s/%s'", caOutputPlaceholder(in.Ref, "out"), name))
 			}
 		}
 		return strings.Join(parts, " ")
@@ -258,25 +352,25 @@ cd "$src"
 			return fmt.Sprintf(
 				`set -euo pipefail
 %s
-mkdir -p "$out"
-"%s" %s %s -o "$out/%s"
-`, pathPrefix, d.Tool, shellQuoteFlags(d.Flags), inputList, d.OutName)
+mkdir -p "%s"
+"%s" %s %s -o "%s"
+`, pathPrefix, d.outDir(), d.Tool, shellQuoteFlags(d.Flags), inputList, d.outPath())
 		}
 		return fmt.Sprintf(
 			`set -euo pipefail
 %s
-mkdir -p "$out"
-"%s" %s %s %s -o "$out/%s"
-`, pathPrefix, d.Tool, shellQuoteFlags(nonLflags), inputList, shellQuoteFlags(lflags), d.OutName)
+mkdir -p "%s"
+"%s" %s %s %s -o "%s"
+`, pathPrefix, d.outDir(), d.Tool, shellQuoteFlags(nonLflags), inputList, shellQuoteFlags(lflags), d.outPath())
 	case KindArchive:
 		// `ar` is taken from PATH (set above) and `D` is prepended to
 		// arFlags for a deterministic archive.
 		return fmt.Sprintf(
 			`set -euo pipefail
 %s
-mkdir -p "$out"
-ar D%s "$out/%s" %s
-`, pathPrefix, d.ARFlags, d.OutName, inputs())
+mkdir -p "%s"
+ar D%s "%s" %s
+`, pathPrefix, d.outDir(), d.ARFlags, d.outPath(), inputs())
 	}
 	return ""
 }
@@ -348,7 +442,17 @@ func derivInputsList(inputs []derivInput) string {
 		case "nix":
 			drv = "import " + in.Ref
 		}
-		fmt.Fprintf(&b, "{ drv = %s; name = %q; } ", drv, in.Name)
+		// Same FHS reach-in as the JSON path: resolve-script.nix renders
+		// "${i.drv}/${i.name}", so name must carry the producer's subdir
+		// or native mode would look for an archive at the output root
+		// while the archive drv wrote it to lib/. One rule, both formats.
+		name := in.Name
+		if in.InputKind == "nix" {
+			if sub := inputSubdirFor(in.Name); sub != "" {
+				name = sub + "/" + name
+			}
+		}
+		fmt.Fprintf(&b, "{ drv = %s; name = %q; } ", drv, name)
 	}
 	b.WriteString("]")
 	return b.String()
