@@ -116,12 +116,12 @@ let
     target = "bin/llvm-tblgen";
     nativeBuildInputs = commonNativeBuildInputs;
     # phase1.result gives us a real llvm-min-tblgen at
-    # ${phase1.result}/llvm-min-tblgen. Mount it via buildInputs so
+    # ${phase1.result}/bin/llvm-min-tblgen. Mount it via buildInputs so
     # it's on-disk when cmake fires.
     buildInputs = commonBuildInputs ++ [ phase1.result ];
     buildCommand = ''
       NIXGG_BYPASS=1 cmake -S llvm -B build -G Ninja ${commonCmakeFlags} \
-        -DLLVM_TABLEGEN=${phase1.result}/llvm-min-tblgen
+        -DLLVM_TABLEGEN=${phase1.result}/bin/llvm-min-tblgen
       ninja -C build -j"$NIX_BUILD_CORES" llvm-tblgen
     '';
   };
@@ -130,8 +130,8 @@ let
   # LLVM_NATIVE_TOOL_DIR can find both binaries.
   toolbin = runCommand "llvm-toolbin-19.1.7" { } ''
     mkdir -p $out
-    ln -s ${phase1.result}/llvm-min-tblgen $out/llvm-min-tblgen
-    ln -s ${phase2.result}/llvm-tblgen $out/llvm-tblgen
+    ln -s ${phase1.result}/bin/llvm-min-tblgen $out/llvm-min-tblgen
+    ln -s ${phase2.result}/bin/llvm-tblgen $out/llvm-tblgen
   '';
 
   phase3 = mkNixggBuild {

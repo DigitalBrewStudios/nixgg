@@ -48,10 +48,21 @@ JSON drv while native mode passes the same text through a thunk for
 eval time. The two modes cannot disagree about flag quoting or
 argument order because there is only one place that decides either.
 
-The end-to-end equivalence is pinned by
-[tests/drv-equivalence.sh](tests/drv-equivalence.sh): 81 drvs across
-four fixtures — `hello` (3), `lua` (37), `fmt` (3), `mosh` (38) — every
-one matching byte-for-byte between the two modes.
+Two tests, covering different failure modes:
+
+- [tests/drv-equivalence.sh](tests/drv-equivalence.sh) — the invariant.
+  149 drvs across five fixtures: `hello` (3), `lua` (37), `fmt` (3),
+  `mosh` (38), `gcc` (68), every one matching byte-for-byte between the
+  two modes. ~25 min; `ONLY=hello` is a 35-second smoke of the same
+  machinery.
+- [tests/smoke.sh](tests/smoke.sh) — every example builds, its artifact
+  is at the FHS path it should be, and it runs. ~2 min;
+  `EXAMPLES=all` adds redis, ffmpeg and llvm.
+
+The second exists because the first structurally cannot catch a whole
+class of bug: it compares drv *hashes* and never realises an output, so
+it stayed green at 149/149 while a change to output placement left
+native mode unable to collect any artifact at all.
 
 ### Invoking sandbox mode explicitly
 

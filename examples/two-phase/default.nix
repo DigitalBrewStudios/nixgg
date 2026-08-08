@@ -7,7 +7,7 @@
 # Structure:
 #   phase1 (codegen/) → produces the `codegen` binary
 #   phase2 (app/)     → cmake-style: buildInputs = [ phase1.result ],
-#                       CODEGEN=${phase1.result}/codegen path passed
+#                       CODEGEN=${phase1.result}/bin/codegen path passed
 #                       to the Makefile so `codegen hello > generated.h`
 #                       runs mid-build. main.c #includes generated.h.
 #
@@ -42,7 +42,7 @@ let
     # mounted at that store path.
     buildInputs = [ phase1.result ];
     buildCommand = ''
-      make -j"$NIX_BUILD_CORES" CODEGEN=${phase1.result}/codegen
+      make -j"$NIX_BUILD_CORES" CODEGEN=${phase1.result}/bin/codegen
     '';
   };
 in

@@ -135,7 +135,9 @@ nixgg/
 │   └── nixgg-sandbox.nix       builder-rpc-v0 sandbox fixture
 ├── example/                    smoke-test Makefile (main.cc + util.cc)
 ├── tests/
-│   └── drv-equivalence.sh      native ↔ sandbox drv-hash regression test
+│   ├── drv-equivalence.sh      native ↔ sandbox drv-hash regression test
+│   └── smoke.sh                every example builds, lands at its FHS
+│                               path, and runs (what the hash test can't see)
 └── go/internal/
     ├── dispatch/               argv[0] classification, @rspfile expansion
     ├── mode/                   placeholder vs. realise (filename patterns)
