@@ -512,3 +512,61 @@ func TestParseLinkArgsPreservesArchiveGroup(t *testing.T) {
 		})
 	}
 }
+
+// TestStoreInputPromotedArtifactKeepsItsSubdir guards the second half of
+// the FHS change, which the first half's test did not cover.
+//
+// storeInput uses classify.Result.Sub when it has one. It does not have
+// one for our OWN promoted outputs: `force` copies a realised artifact
+// into the working tree as a real file, and the promoted registry records
+// only the store ROOT — so Sub is empty and the artifact's FHS subdir has
+// to be re-derived from its name.
+//
+// Missing that broke native-mode lua: liblua.a is at <root>/lib/liblua.a
+// but was referenced as <root>/liblua.a, so luac failed with
+//
+//	ld.bfd: cannot find …-ar-liblua.a/liblua.a: No such file or directory
+//
+// Note this is NOT the same case as the earlier zlib subpath bug. There,
+// Sub was correctly populated from a resolved symlink and the fix was to
+// stop discarding it. Here Sub is legitimately empty and the subdir must
+// be reconstructed. Two different causes, same symptom.
+func TestStoreInputPromotedArtifactKeepsItsSubdir(t *testing.T) {
+	const root = "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-ar-liblua.a"
+
+	t.Run("promoted archive gets lib/", func(t *testing.T) {
+		// Sub empty: this is a promoted output, not a resolved symlink.
+		c := classify.Result{Kind: classify.Store, Ref: root}
+		ni, ji := storeInput(c, "/build/lua/src/liblua.a")
+		if ni.Name != "lib/liblua.a" {
+			t.Errorf("native Name = %q, want \"lib/liblua.a\" — the archive drv "+
+				"wrote it under lib/, so a flat reference cannot resolve", ni.Name)
+		}
+		if ji.Name != "lib/liblua.a" {
+			t.Errorf("sandbox Name = %q, want \"lib/liblua.a\"", ji.Name)
+		}
+	})
+
+	t.Run("promoted object stays flat", func(t *testing.T) {
+		c := classify.Result{Kind: classify.Store,
+			Ref: "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-tu-main.o"}
+		ni, _ := storeInput(c, "/build/obj/main.o")
+		if ni.Name != "main.o" {
+			t.Errorf("Name = %q, want \"main.o\" — compile outputs are flat", ni.Name)
+		}
+	})
+
+	t.Run("an explicit Sub still wins", func(t *testing.T) {
+		// A foreign dependency reached through a symlink: classify resolved
+		// the real position, and that must take precedence over any rule
+		// inferred from the filename.
+		c := classify.Result{Kind: classify.Store,
+			Ref: "/nix/store/cccccccccccccccccccccccccccccccc-zlib-1.3",
+			Sub: "lib/libz.so",
+		}
+		ni, _ := storeInput(c, "/build/deps/libz.so")
+		if ni.Name != "lib/libz.so" {
+			t.Errorf("Name = %q, want the resolved Sub", ni.Name)
+		}
+	})
+}

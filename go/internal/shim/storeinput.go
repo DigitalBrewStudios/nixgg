@@ -28,7 +28,25 @@ import (
 func storeInput(c classify.Result, callerPath string) (expr.Input, expr.JSONDrvInput) {
 	rel := c.Sub
 	if rel == "" {
-		rel = filepath.Base(callerPath)
+		// No Sub means classification could not observe the artifact's
+		// position inside its store path. Two ways that happens, and they
+		// need opposite treatment:
+		//
+		//   - A foreign dependency reached through a symlink: Sub IS set
+		//     (classify resolved the link), so we never get here.
+		//   - One of OUR OWN outputs that `force` promoted to a real file:
+		//     the promoted registry records only the store ROOT, so Sub is
+		//     empty and the artifact's FHS subdir has to be re-derived.
+		//
+		// Missing the second case broke native-mode lua: liblua.a lives at
+		// <root>/lib/liblua.a but was referenced as <root>/liblua.a, and
+		// luac failed with `ld: cannot find …-ar-liblua.a/liblua.a`.
+		base := filepath.Base(callerPath)
+		if sub := expr.ArtifactSubdir(base); sub != "" {
+			rel = sub + "/" + base
+		} else {
+			rel = base
+		}
 	}
 	return expr.Input{
 			Kind: "store", Ref: c.Ref, Name: rel,

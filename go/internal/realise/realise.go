@@ -16,6 +16,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/tbereknyei/nixgg/internal/expr"
 	"github.com/tbereknyei/nixgg/internal/paths"
 	"github.com/tbereknyei/nixgg/internal/thunk"
 	"github.com/tbereknyei/nixgg/internal/toolchain"
@@ -249,7 +250,16 @@ func promoteManifest(l paths.Layout, cfg *toolchain.Config, id thunk.ID, storePa
 // A copy is 30-100KB per TU, ~5MB across a redis build. Cheap next to
 // the wall-clock savings from correct incremental behavior.
 func PromoteToStore(l paths.Layout, cfg *toolchain.Config, thunkID thunk.ID, storePath, target string) error {
-	src := altStoreOnDisk(cfg.Store, storePath) + "/" + filepath.Base(target)
+	// Reach into the FHS subdir the emitted script wrote to: link
+	// outputs land in $out/bin, ar outputs in $out/lib, compile outputs
+	// flat. expr.ArtifactSubdir is the same function the emitters use, so
+	// this cannot drift from where the artifact actually is.
+	base := filepath.Base(target)
+	src := altStoreOnDisk(cfg.Store, storePath) + "/"
+	if sub := expr.ArtifactSubdir(base); sub != "" {
+		src += sub + "/"
+	}
+	src += base
 	if _, err := os.Stat(src); err != nil {
 		return fmt.Errorf("expected %s to exist: %w", src, err)
 	}

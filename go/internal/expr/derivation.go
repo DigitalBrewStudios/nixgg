@@ -142,7 +142,19 @@ type derivInput struct {
 // sandbox mode and "" in native mode for the same input — the two would
 // emit different scripts and produce different drv hashes, breaking the
 // one invariant this project rests on.
-func inputSubdirFor(name string) string {
+func inputSubdirFor(name string) string { return ArtifactSubdir(name) }
+
+// ArtifactSubdir is inputSubdirFor, exported for the one caller outside
+// this package that has to agree with it: native mode's PromoteToStore
+// copies the realised artifact out of the store into the working tree, so
+// it must look where the emitted script actually wrote it.
+//
+// That call site is not covered by tests/drv-equivalence.sh, which
+// compares drv HASHES and never reads a realised output. Missing it left
+// `make` in native mode failing with "expected …/bin-hello/hello to
+// exist" after outputs moved under bin/ — the drvs were correct and
+// identical across modes, but nothing fetched the result.
+func ArtifactSubdir(name string) string {
 	base := name
 	if i := strings.LastIndexByte(base, '/'); i >= 0 {
 		base = base[i+1:]
