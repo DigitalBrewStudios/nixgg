@@ -85,7 +85,7 @@ func Link(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layo
 	if err != nil {
 		return err
 	}
-	storeDeps := storedeps.From(flags, wrapperEnvJSON)
+	storeDeps := storedeps.From(flags, wrapperEnvJSON, cfg.KnownStorePaths)
 
 	// Sandbox mode: emit JSON, submit as this outer derivation's output.
 	if sandbox.Enabled() {

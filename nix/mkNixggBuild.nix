@@ -61,6 +61,48 @@ let
     else "bin-";
   drvName = "${targetPrefix}${targetBase}.drv";
 
+  # The set of "known" store-path inputs the shims are allowed to treat
+  # as real references — passed to both modes as the literal JSON in
+  # knownStorePathsJSON below (preBuild for sandbox, shellHook for
+  # native). Computed once at eval time so both modes see byte-identical
+  # input, which is what makes their drv hashes comparable at all.
+  #
+  # Each package expands to *every* output it has (via `.all`, which
+  # every multi-output derivation carries — lib/customisation.nix), not
+  # just its default output. Packages like zlib/ncurses/openssl put
+  # headers under a separate `dev` output at a different store path
+  # than the default `out`; stdenv's setup-hooks add -isystem/-L for
+  # both. Using only `toString pkg` (the default output) meant the
+  # `-dev` path never matched anything in this list, so storedeps.From
+  # found nothing for it and it never made it into inputs.srcs — the
+  # sandbox build then failed with "fatal error: zlib.h: No such file
+  # or directory" even though the CFLAGS were pointing right at it.
+  #
+  # Deliberately NOT each output's transitive closure (which
+  # exportReferencesGraph would give in sandbox mode, but has no
+  # eval-time equivalent for native mode): the closure of e.g.
+  # openssl-dev includes libxcrypt, which then gets matched into
+  # inputs.srcs on the sandbox side only, since native mode has no way
+  # to compute that closure without a build — an asymmetry that broke
+  # drv-hash equivalence across every single TU. The plain output list
+  # is already the right scope: what we're matching against is text
+  # setup-hooks of exactly these packages emit into
+  # NIX_CFLAGS_COMPILE/NIX_LDFLAGS, not their dependencies' dependencies.
+  knownStorePathInputs =
+    builtins.concatMap (p: p.all or [ p ]) (
+      buildInputs
+      ++ propagatedBuildInputs
+      ++ [
+        bash
+        coreutils
+        gcc
+        nixgg
+        nixHelpers
+        patchedNix
+      ]
+    );
+  knownStorePathsJSON = builtins.toJSON (map toString knownStorePathInputs);
+
   # Shell prelude shared by the sandbox build (`preBuild`) and the
   # native-replay dev shell (`shellHook`).
   #
@@ -107,6 +149,7 @@ let
     NIX_CFLAGS_COMPILE=$(printf '%s' "''${NIX_CFLAGS_COMPILE:-}" | sed -e 's| *-frandom-seed=[^ ]*||g')
     NIX_LDFLAGS=$(printf '%s' "''${NIX_LDFLAGS:-}" | sed -e 's| *-rpath [^ ]*/outputs/out/lib||g' -e 's| *-rpath /nonexistent/lib||g')
     export NIX_CFLAGS_COMPILE NIX_LDFLAGS
+    export NIXGG_KNOWN_STORE_PATHS=${lib.escapeShellArg knownStorePathsJSON}
   '';
 
   drv = stdenv.mkDerivation {
@@ -131,17 +174,17 @@ let
     # shim submission phase.
     enableParallelBuilding = true;
 
-    # nix-command + ca + dyn-drv for the inner nix invocations our
-    # shims make (nix derivation add / nix store add / submit-output).
-    NIX_CONFIG = ''
-      extra-experimental-features = nix-command ca-derivations dynamic-derivations
-    '';
-
     requiredSystemFeatures = [ "builder-rpc-v0" ];
 
     __contentAddressed = true;
     outputHashMode = "text";
     outputHashAlgo = "sha256";
+
+    # nix-command + ca + dyn-drv for the inner nix invocations our
+    # shims make (nix derivation add / nix store add / submit-output).
+    NIX_CONFIG = ''
+      extra-experimental-features = nix-command ca-derivations dynamic-derivations
+    '';
 
     # NIXGG_* the shims read.
     NIXGG_ROOT           = "${nixgg}";

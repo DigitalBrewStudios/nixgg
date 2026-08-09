@@ -8,6 +8,7 @@
 package toolchain
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"runtime"
@@ -59,6 +60,19 @@ type Config struct {
 	// (e.g. "x86_64-linux"). Defaults to $NIXGG_SYSTEM, else falls
 	// back to a compile-time constant matching this build.
 	System string
+
+	// The full set of store paths mkNixggBuild.nix declared as inputs
+	// (every output of buildInputs/propagatedBuildInputs plus the
+	// toolchain roots — see knownStorePathInputs in mkNixggBuild.nix).
+	// storedeps matches flag/env text against this list rather than
+	// guessing at Nix's store-path grammar with a regex — see
+	// storedeps.go. Populated from $NIXGG_KNOWN_STORE_PATHS, a JSON
+	// array literal computed at eval time and exported identically by
+	// both preBuild (sandbox) and shellHook (native) via
+	// scrubWrapperEnv, so both modes see byte-identical input — that's
+	// what keeps their drv hashes comparable. Empty, not an error, if
+	// unset or unparseable — storedeps then simply finds nothing.
+	KnownStorePaths []string
 }
 
 // FromEnv reads the NIXGG_* variables. Returns an error listing every
@@ -78,6 +92,7 @@ func FromEnv() (*Config, error) {
 	if c.System == "" {
 		c.System = defaultSystem()
 	}
+	c.KnownStorePaths = knownStorePathsFromEnv()
 	var missing []string
 	if c.RealCC == "" {
 		missing = append(missing, "NIXGG_REAL_CC")
@@ -104,4 +119,21 @@ func FromEnv() (*Config, error) {
 		return nil, fmt.Errorf("missing env: %v (run `nixgg env` to bootstrap)", missing)
 	}
 	return c, nil
+}
+
+// knownStorePathsFromEnv parses $NIXGG_KNOWN_STORE_PATHS, a JSON array
+// of store path strings mkNixggBuild.nix exports identically in both
+// modes (see scrubWrapperEnv there). Returns nil if unset or
+// unparseable — never an error, since an empty manifest just means
+// storedeps finds nothing.
+func knownStorePathsFromEnv() []string {
+	s := os.Getenv("NIXGG_KNOWN_STORE_PATHS")
+	if s == "" {
+		return nil
+	}
+	var paths []string
+	if err := json.Unmarshal([]byte(s), &paths); err != nil {
+		return nil
+	}
+	return paths
 }

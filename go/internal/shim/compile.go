@@ -148,7 +148,7 @@ func Compile(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.L
 	if err != nil {
 		return err
 	}
-	storeDeps := storedeps.From(sandboxFlags, wrapperEnvJSON)
+	storeDeps := storedeps.From(sandboxFlags, wrapperEnvJSON, cfg.KnownStorePaths)
 
 	// srcTree is a Nix path literal referring to the staging dir.
 	// Absolute so the thunk file survives `cp` to a peer directory —

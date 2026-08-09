@@ -73,7 +73,7 @@ func Archive(args []string, cfg *toolchain.Config, l paths.Layout) error {
 	// Archives have no flag list of their own; the CA hash comes from
 	// inputs + modifiers. Wrapper env still matters if any input was
 	// compiled with -fPIC / whatever, so we plumb it.
-	storeDeps := storedeps.From(nil, wrapperEnvJSON)
+	storeDeps := storedeps.From(nil, wrapperEnvJSON, cfg.KnownStorePaths)
 
 	if sandbox.Enabled() {
 		return archiveSandbox(cfg, archive, modifiers, jsonInputs, storeDeps, wrapperEnvJSON)
