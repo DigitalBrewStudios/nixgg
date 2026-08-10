@@ -144,6 +144,16 @@ type derivInput struct {
 // one invariant this project rests on.
 func inputSubdirFor(name string) string { return ArtifactSubdir(name) }
 
+// StoreBasename returns the text after the last '/' in p — the
+// hash+name basename `nix derivation add` wants for an inputs.srcs
+// entry, or a drv's own store-path basename.
+func StoreBasename(p string) string {
+	if i := strings.LastIndexByte(p, '/'); i >= 0 {
+		return p[i+1:]
+	}
+	return p
+}
+
 // ArtifactSubdir is inputSubdirFor, exported for the one caller outside
 // this package that has to agree with it: native mode's PromoteToStore
 // copies the realised artifact out of the store into the working tree, so
@@ -155,10 +165,7 @@ func inputSubdirFor(name string) string { return ArtifactSubdir(name) }
 // exist" after outputs moved under bin/ — the drvs were correct and
 // identical across modes, but nothing fetched the result.
 func ArtifactSubdir(name string) string {
-	base := name
-	if i := strings.LastIndexByte(base, '/'); i >= 0 {
-		base = base[i+1:]
-	}
+	base := StoreBasename(name)
 	switch {
 	case strings.HasSuffix(base, ".o"):
 		return ""
@@ -515,10 +522,7 @@ func (d *Derivation) toJSON(extraSrcs []string, _reserved any) JSONDrv {
 	for _, in := range d.Inputs {
 		switch in.InputKind {
 		case "nix":
-			refKey := in.Ref
-			if i := strings.LastIndexByte(refKey, '/'); i >= 0 {
-				refKey = refKey[i+1:]
-			}
+			refKey := StoreBasename(in.Ref)
 			ref := drvs[refKey]
 			ref.Outputs = appendUnique(ref.Outputs, "out")
 			if ref.DynamicOutputs == nil {
@@ -526,10 +530,7 @@ func (d *Derivation) toJSON(extraSrcs []string, _reserved any) JSONDrv {
 			}
 			drvs[refKey] = ref
 		case "store":
-			base := in.Ref
-			if i := strings.LastIndexByte(base, '/'); i >= 0 {
-				base = base[i+1:]
-			}
+			base := StoreBasename(in.Ref)
 			if !seenSrc[base] {
 				srcs = append(srcs, base)
 				seenSrc[base] = true
@@ -537,10 +538,7 @@ func (d *Derivation) toJSON(extraSrcs []string, _reserved any) JSONDrv {
 		}
 	}
 	for _, sd := range d.StoreDeps {
-		base := sd
-		if i := strings.LastIndexByte(base, '/'); i >= 0 {
-			base = base[i+1:]
-		}
+		base := StoreBasename(sd)
 		if !seenSrc[base] {
 			srcs = append(srcs, base)
 			seenSrc[base] = true

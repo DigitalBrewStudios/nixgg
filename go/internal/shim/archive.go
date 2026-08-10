@@ -2,11 +2,9 @@ package shim
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/tbereknyei/nixgg/internal/classify"
 	"github.com/tbereknyei/nixgg/internal/expr"
 	"github.com/tbereknyei/nixgg/internal/paths"
 	"github.com/tbereknyei/nixgg/internal/sandbox"
@@ -43,27 +41,11 @@ func Archive(args []string, cfg *toolchain.Config, l paths.Layout) error {
 	logf("archive %s <- %s", archive, joinBase(inputs))
 
 	altPrefix := altStorePrefix(cfg.Store)
-	arInputs := make([]expr.Input, 0, len(inputs))
-	jsonInputs := make([]expr.JSONDrvInput, 0, len(inputs))
-	for _, in := range inputs {
-		c := classify.Target(in, altPrefix, l)
-		switch c.Kind {
-		case classify.Store:
-			ni, ji := storeInput(c, in)
-			arInputs = append(arInputs, ni)
-			jsonInputs = append(jsonInputs, ji)
-		case classify.Thunk:
-			arInputs = append(arInputs, expr.Input{
-				Kind: "nix", Ref: c.Ref, Name: filepath.Base(in),
-			})
-		case classify.Drv:
-			jsonInputs = append(jsonInputs, expr.JSONDrvInput{
-				Kind: "drv", Ref: c.Ref, Name: filepath.Base(in),
-			})
-		default:
-			logf("ar passthrough: can't model input %s (%s)", in, c.Reason())
-			return Passthrough(realARFor(cfg), args)
-		}
+	arInputs, jsonInputs, err, ok := classifyInputs(inputs, altPrefix, l, "ar", func() error {
+		return Passthrough(realARFor(cfg), args)
+	})
+	if !ok {
+		return err
 	}
 
 	wrapperEnvJSON, err := wrapperenv.JSON()
@@ -79,13 +61,17 @@ func Archive(args []string, cfg *toolchain.Config, l paths.Layout) error {
 		return archiveSandbox(cfg, archive, modifiers, jsonInputs, storeDeps, wrapperEnvJSON)
 	}
 
+	wrapperEnv, err := decodeStringMap(wrapperEnvJSON)
+	if err != nil {
+		return err
+	}
 	e := expr.Archive(expr.ArchiveParams{
-		Helpers:        cfg.Helpers,
-		OutName:        filepath.Base(archive),
-		Inputs:         arInputs,
-		ARFlags:        modifiers,
-		StoreDepsJSON:  storedeps.AsJSONArray(storeDeps),
-		WrapperEnvJSON: wrapperEnvJSON,
+		Helpers:    cfg.Helpers,
+		OutName:    filepath.Base(archive),
+		Inputs:     arInputs,
+		ARFlags:    modifiers,
+		StoreDeps:  storeDeps,
+		WrapperEnv: wrapperEnv,
 	})
 
 	id := thunk.Compute(e)
@@ -199,9 +185,6 @@ func archiveSandbox(
 		},
 		Env: wrapperEnv,
 	})
-	for _, sd := range storeDeps {
-		drv.Inputs.Srcs = append(drv.Inputs.Srcs, baseNameOf(sd))
-	}
 	drvPath, err := sandbox.DerivationAdd(cfg, drv)
 	if err != nil {
 		return err
@@ -211,17 +194,8 @@ func archiveSandbox(
 	}
 	logf("  drv:        %s", drvPath)
 
-	// Archives are usually intermediate, but a build whose final
-	// artifact is a static library (fmt: libfmt.a, no link step) needs
-	// the archive drv itself submitted as the outer output. Submit iff
-	// this matches NIXGG_SANDBOX_TARGET — same rule the link shim uses.
-	if target := os.Getenv("NIXGG_SANDBOX_TARGET"); target != "" && matchesTarget(target, archive) {
-		if err := sandbox.SubmitOutput(cfg, drvPath, "out"); err != nil {
-			logf("  submit-output: %v", err)
-		} else {
-			logf("  submitted: %s", drvPath)
-		}
-	}
+	// See maybeSubmit's comment.
+	maybeSubmit(cfg, drvPath, archive, false)
 	return nil
 }
 

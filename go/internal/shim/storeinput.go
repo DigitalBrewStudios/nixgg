@@ -1,10 +1,14 @@
 package shim
 
 import (
+	"os"
 	"path/filepath"
 
 	"github.com/tbereknyei/nixgg/internal/classify"
 	"github.com/tbereknyei/nixgg/internal/expr"
+	"github.com/tbereknyei/nixgg/internal/paths"
+	"github.com/tbereknyei/nixgg/internal/sandbox"
+	"github.com/tbereknyei/nixgg/internal/toolchain"
 )
 
 // storeInput builds the pair of per-input records a Store-classified
@@ -53,4 +57,64 @@ func storeInput(c classify.Result, callerPath string) (expr.Input, expr.JSONDrvI
 		}, expr.JSONDrvInput{
 			Kind: "src", Ref: filepath.Base(c.Ref), Name: rel,
 		}
+}
+
+// classifyInputs classifies every input path a link or archive step
+// received, so link.go and archive.go can't drift on how a
+// Store/Thunk/Drv classification becomes an expr.Input/JSONDrvInput
+// pair. logPrefix names the caller in log lines ("link"/"ar");
+// passthrough runs the moment an input can't be modeled, and its
+// error is returned with ok=false.
+func classifyInputs(
+	inputs []string, altPrefix string, l paths.Layout, logPrefix string, passthrough func() error,
+) (linkInputs []expr.Input, jsonInputs []expr.JSONDrvInput, err error, ok bool) {
+	linkInputs = make([]expr.Input, 0, len(inputs))
+	jsonInputs = make([]expr.JSONDrvInput, 0, len(inputs))
+	for _, in := range inputs {
+		c := classify.Target(in, altPrefix, l)
+		switch c.Kind {
+		case classify.Store:
+			ni, ji := storeInput(c, in)
+			linkInputs = append(linkInputs, ni)
+			jsonInputs = append(jsonInputs, ji)
+		case classify.Thunk:
+			linkInputs = append(linkInputs, expr.Input{
+				Kind: "nix", Ref: c.Ref, Name: filepath.Base(in),
+			})
+		case classify.Drv:
+			// Sandbox-mode input: previous shim produced a .drv here.
+			// Only meaningful when we're also in sandbox mode.
+			jsonInputs = append(jsonInputs, expr.JSONDrvInput{
+				Kind: "drv", Ref: c.Ref, Name: filepath.Base(in),
+			})
+		default:
+			logf("%s passthrough: can't model input %s (%s)", logPrefix, in, c.Reason())
+			return nil, nil, passthrough(), false
+		}
+	}
+	return linkInputs, jsonInputs, nil, true
+}
+
+// maybeSubmit submits drvPath as the outer derivation's "out" output
+// iff path matches NIXGG_SANDBOX_TARGET, or TARGET is unset and
+// defaultSubmit is true.
+//
+// linkSandbox passes defaultSubmit=true (a link is usually the final
+// artifact); archiveSandbox passes false (an archive is usually
+// intermediate, consumed by a later link — it only submits when
+// TARGET names it explicitly, e.g. a static-lib-only build).
+func maybeSubmit(cfg *toolchain.Config, drvPath, path string, defaultSubmit bool) {
+	target := os.Getenv("NIXGG_SANDBOX_TARGET")
+	submit := defaultSubmit
+	if target != "" {
+		submit = matchesTarget(target, path)
+	}
+	if !submit {
+		return
+	}
+	if err := sandbox.SubmitOutput(cfg, drvPath, "out"); err != nil {
+		logf("  submit-output: %v", err)
+	} else {
+		logf("  submitted: %s", drvPath)
+	}
 }

@@ -37,47 +37,21 @@ func compileDerivation(p CompileParams) *Derivation {
 		Source:     p.Source,
 		OutName:    p.OutName,
 		Flags:      p.Flags,
-		StoreDeps:  decodeStringArray(p.StoreDepsJSON),
-		WrapperEnv: decodeStringObject(p.WrapperEnvJSON),
+		StoreDeps:  p.StoreDeps,
+		WrapperEnv: p.WrapperEnv,
 	}
-}
-
-// decodeStringArray parses `["a","b",…]` back into []string.
-// storeDepsJSON is stored pre-encoded on the params struct
-// (historical); we re-parse to feed the shared struct.
-func decodeStringArray(s string) []string {
-	if s == "" || s == "[]" {
-		return nil
-	}
-	var out []string
-	if err := json.Unmarshal([]byte(s), &out); err != nil {
-		return nil
-	}
-	return out
-}
-
-// decodeStringObject parses `{"K": "V", …}` back into map[string]string.
-func decodeStringObject(s string) map[string]string {
-	if s == "" || s == "{}" {
-		return nil
-	}
-	var out map[string]string
-	if err := json.Unmarshal([]byte(s), &out); err != nil {
-		return nil
-	}
-	return out
 }
 
 // CompileParams is the input for one compile expression.
 type CompileParams struct {
-	Helpers        string   // /nix/store/…-nixgg-nix
-	Tool           string   // "cc", "gcc", "c++", "g++"
-	SrcTree        string   // Nix path literal, e.g. "../srcs/foo"
-	Source         string   // relative path inside srcTree, e.g. "src/foo.c"
-	OutName        string   // "foo.o"
-	Flags          []string // sandbox-relative flags
-	StoreDepsJSON  string   // pre-encoded JSON array
-	WrapperEnvJSON string   // pre-encoded JSON object
+	Helpers    string            // /nix/store/…-nixgg-nix
+	Tool       string            // "cc", "gcc", "c++", "g++"
+	SrcTree    string            // Nix path literal, e.g. "../srcs/foo"
+	Source     string            // relative path inside srcTree, e.g. "src/foo.c"
+	OutName    string            // "foo.o"
+	Flags      []string          // sandbox-relative flags
+	StoreDeps  []string          // /nix/store/... roots referenced by Flags/WrapperEnv
+	WrapperEnv map[string]string // NIX_CFLAGS_COMPILE etc.
 }
 
 // Link builds a link expression. Same Derivation-based flow as
@@ -94,8 +68,8 @@ func linkDerivation(p LinkParams) *Derivation {
 		Inputs:      inputsToDeriv(p.Inputs),
 		Flags:       p.Flags,
 		GroupInputs: p.GroupInputs,
-		StoreDeps:   decodeStringArray(p.StoreDepsJSON),
-		WrapperEnv:  decodeStringObject(p.WrapperEnvJSON),
+		StoreDeps:   p.StoreDeps,
+		WrapperEnv:  p.WrapperEnv,
 	}
 }
 
@@ -108,9 +82,9 @@ type LinkParams struct {
 	Flags   []string
 	// GroupInputs wraps the input list in --start-group/--end-group.
 	// See Derivation.GroupInputs.
-	GroupInputs    bool
-	StoreDepsJSON  string
-	WrapperEnvJSON string
+	GroupInputs bool
+	StoreDeps   []string
+	WrapperEnv  map[string]string
 }
 
 // Archive builds an `ar` expression. Same Derivation-based flow.
@@ -124,8 +98,8 @@ func archiveDerivation(p ArchiveParams) *Derivation {
 		OutName:    p.OutName,
 		Inputs:     inputsToDeriv(p.Inputs),
 		ARFlags:    p.ARFlags,
-		StoreDeps:  decodeStringArray(p.StoreDepsJSON),
-		WrapperEnv: decodeStringObject(p.WrapperEnvJSON),
+		StoreDeps:  p.StoreDeps,
+		WrapperEnv: p.WrapperEnv,
 	}
 }
 
@@ -145,12 +119,12 @@ func inputsToDeriv(xs []Input) []derivInput {
 
 // ArchiveParams is the input for one archive expression.
 type ArchiveParams struct {
-	Helpers        string
-	OutName        string
-	Inputs         []Input
-	ARFlags        string
-	StoreDepsJSON  string
-	WrapperEnvJSON string
+	Helpers    string
+	OutName    string
+	Inputs     []Input
+	ARFlags    string
+	StoreDeps  []string
+	WrapperEnv map[string]string
 }
 
 // Input describes one linker/archiver input.
@@ -441,10 +415,7 @@ func inputsFromJSON(xs []JSONDrvInput) []derivInput {
 //
 // drvPath is expected to be a full store path — /nix/store/<hash>-<name>.drv.
 func caOutputPlaceholder(drvPath, output string) string {
-	base := drvPath
-	if i := strings.LastIndexByte(base, '/'); i >= 0 {
-		base = base[i+1:]
-	}
+	base := StoreBasename(drvPath)
 	// A store-path basename is "<32-char-hash>-<name>".
 	// storeHashLen = 32 chars (Nix32 encoding of 160-bit compressed hash).
 	if len(base) <= storeHashLen+1 {

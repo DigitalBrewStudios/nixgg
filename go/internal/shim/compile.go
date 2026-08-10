@@ -149,6 +149,10 @@ func Compile(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.L
 		return err
 	}
 	storeDeps := storedeps.From(sandboxFlags, wrapperEnvJSON, cfg.KnownStorePaths)
+	wrapperEnv, err := decodeStringMap(wrapperEnvJSON)
+	if err != nil {
+		return err
+	}
 
 	// srcTree is a Nix path literal referring to the staging dir.
 	// Absolute so the thunk file survives `cp` to a peer directory —
@@ -157,14 +161,14 @@ func Compile(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.L
 	_ = stageRes // reuse info is informational only under the new design
 
 	e := expr.Compile(expr.CompileParams{
-		Helpers:        cfg.Helpers,
-		Tool:           tool.Basename(),
-		SrcTree:        srcTreeLiteral,
-		Source:         srcRel,
-		OutName:        filepath.Base(output),
-		Flags:          sandboxFlags,
-		StoreDepsJSON:  storedeps.AsJSONArray(storeDeps),
-		WrapperEnvJSON: wrapperEnvJSON,
+		Helpers:    cfg.Helpers,
+		Tool:       tool.Basename(),
+		SrcTree:    srcTreeLiteral,
+		Source:     srcRel,
+		OutName:    filepath.Base(output),
+		Flags:      sandboxFlags,
+		StoreDeps:  storeDeps,
+		WrapperEnv: wrapperEnv,
 	})
 
 	// 5. Dispatch on mode.
@@ -259,12 +263,6 @@ func compileSandbox(
 		},
 		Env: wrapperEnv,
 	})
-	// storeDeps: additional store paths referenced by flags/env
-	// (from storedeps.From). Add them to inputs.srcs so the sandbox
-	// mounts them.
-	for _, sd := range storeDeps {
-		drv.Inputs.Srcs = append(drv.Inputs.Srcs, baseNameOf(sd))
-	}
 
 	drvPath, err := sandbox.DerivationAdd(cfg, drv)
 	if err != nil {
@@ -292,10 +290,7 @@ func decodeStringMap(s string) (map[string]string, error) {
 // baseNameOf strips the /nix/store/ prefix so we get a hash+name
 // basename suitable for a JSONDrv.Inputs.Srcs entry.
 func baseNameOf(p string) string {
-	if i := strings.LastIndexByte(p, '/'); i >= 0 {
-		return p[i+1:]
-	}
-	return p
+	return expr.StoreBasename(p)
 }
 
 // parseCompileArgs identifies the source + output + non-path flags.

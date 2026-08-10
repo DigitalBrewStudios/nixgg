@@ -103,6 +103,24 @@ let
     );
   knownStorePathsJSON = builtins.toJSON (map toString knownStorePathInputs);
 
+  # NIXGG_* vars every shim invocation needs, in both modes. Bound once
+  # so `drv` (as derivation attrs) and `shell` (as shellHook exports)
+  # can't drift apart — the same fix scrubWrapperEnv already applies to
+  # NIX_CFLAGS_COMPILE/NIX_LDFLAGS.
+  toolchainEnv = {
+    NIXGG_ROOT           = "${nixgg}";
+    NIXGG_COMPILER_ROOT  = "${gcc}";
+    NIXGG_BASH_ROOT      = "${bash}";
+    NIXGG_COREUTILS_ROOT = "${coreutils}";
+    NIXGG_GNUMAKE_ROOT   = "${gnumake}";
+    NIXGG_REAL_CC        = "${gcc}/bin/g++";
+    NIXGG_NIX            = "${patchedNix}/bin/nix";
+    NIXGG_NIX_HELPERS    = "${nixHelpers}";
+  };
+  toolchainEnvShellHook = lib.concatStrings (
+    lib.mapAttrsToList (k: v: "export ${k}=${lib.escapeShellArg v}\n") toolchainEnv
+  );
+
   # Shell prelude shared by the sandbox build (`preBuild`) and the
   # native-replay dev shell (`shellHook`).
   #
@@ -152,69 +170,65 @@ let
     export NIXGG_KNOWN_STORE_PATHS=${lib.escapeShellArg knownStorePathsJSON}
   '';
 
-  drv = stdenv.mkDerivation {
-    name = drvName;
-    inherit src;
-    inherit nativeBuildInputs buildInputs propagatedBuildInputs;
+  drv = stdenv.mkDerivation (
+    {
+      name = drvName;
+      inherit src;
+      inherit nativeBuildInputs buildInputs propagatedBuildInputs;
 
-    # builder-rpc-v0 wants $out unset. /nonexistent keeps stdenv's
-    # _assignFirst happy while making any actual write visibly fail.
-    out = "/nonexistent";
+      # builder-rpc-v0 wants $out unset. /nonexistent keeps stdenv's
+      # _assignFirst happy while making any actual write visibly fail.
+      out = "/nonexistent";
 
-    # We set our own build phase; skip cd-into-src (we do that
-    # ourselves after copying to a writable location), install, fixup.
-    dontUnpack = false;    # stdenv unpacks src/ into $NIX_BUILD_TOP
-    dontConfigure = true;  # user's buildCommand does what it needs
-    dontInstall = true;
-    dontFixup = true;
+      # We set our own build phase; skip cd-into-src (we do that
+      # ourselves after copying to a writable location), install, fixup.
+      dontUnpack = false;    # stdenv unpacks src/ into $NIX_BUILD_TOP
+      dontConfigure = true;  # user's buildCommand does what it needs
+      dontInstall = true;
+      dontFixup = true;
 
-    # Populates $NIX_BUILD_CORES (used by build scripts via
-    # `make -j"$NIX_BUILD_CORES"`). Actual per-drv build parallelism
-    # still happens in Nix's outer pass — this only speeds up the
-    # shim submission phase.
-    enableParallelBuilding = true;
+      # Populates $NIX_BUILD_CORES (used by build scripts via
+      # `make -j"$NIX_BUILD_CORES"`). Actual per-drv build parallelism
+      # still happens in Nix's outer pass — this only speeds up the
+      # shim submission phase.
+      enableParallelBuilding = true;
 
-    requiredSystemFeatures = [ "builder-rpc-v0" ];
+      requiredSystemFeatures = [ "builder-rpc-v0" ];
 
-    __contentAddressed = true;
-    outputHashMode = "text";
-    outputHashAlgo = "sha256";
+      __contentAddressed = true;
+      outputHashMode = "text";
+      outputHashAlgo = "sha256";
 
-    # nix-command + ca + dyn-drv for the inner nix invocations our
-    # shims make (nix derivation add / nix store add / submit-output).
-    NIX_CONFIG = ''
-      extra-experimental-features = nix-command ca-derivations dynamic-derivations
-    '';
+      # nix-command + ca + dyn-drv for the inner nix invocations our
+      # shims make (nix derivation add / nix store add / submit-output).
+      NIX_CONFIG = ''
+        extra-experimental-features = nix-command ca-derivations dynamic-derivations
+      '';
 
-    # NIXGG_* the shims read.
-    NIXGG_ROOT           = "${nixgg}";
-    NIXGG_COMPILER_ROOT  = "${gcc}";
-    NIXGG_BASH_ROOT      = "${bash}";
-    NIXGG_COREUTILS_ROOT = "${coreutils}";
-    NIXGG_GNUMAKE_ROOT   = "${gnumake}";
-    NIXGG_REAL_CC        = "${gcc}/bin/g++";
-    NIXGG_NIX            = "${patchedNix}/bin/nix";
-    NIXGG_NIX_HELPERS    = "${nixHelpers}";
-    NIXGG_STORE          = "auto";
-    NIXGG_SANDBOX        = "1";
-    NIXGG_SANDBOX_TARGET = target;
+      # NIXGG_* the shims read. Toolchain roots come from toolchainEnv
+      # (merged below) so they can't drift from shell's shellHook.
+      NIXGG_STORE          = "auto";
+      NIXGG_SANDBOX        = "1";
+      NIXGG_SANDBOX_TARGET = target;
 
-    # See scrubWrapperEnv above for what this does and why. Two points
-    # specific to the sandbox side: the shims/ dir goes ahead of the
-    # toolchain stdenv already put on PATH so cc/c++/ar dispatch through
-    # us, and patchedNix's bin/ is what those shims exec for `nix
-    # derivation add`. buildInputs' own contribution (-isystem / -L /
-    # -rpath into real store paths) survives the scrub: stdenv's
-    # setup-hooks add those AFTER the per-run noise, so filtering the
-    # noise keeps the per-input flags.
-    preBuild = scrubWrapperEnv;
+      # See scrubWrapperEnv above for what this does and why. Two points
+      # specific to the sandbox side: the shims/ dir goes ahead of the
+      # toolchain stdenv already put on PATH so cc/c++/ar dispatch through
+      # us, and patchedNix's bin/ is what those shims exec for `nix
+      # derivation add`. buildInputs' own contribution (-isystem / -L /
+      # -rpath into real store paths) survives the scrub: stdenv's
+      # setup-hooks add those AFTER the per-run noise, so filtering the
+      # noise keeps the per-input flags.
+      preBuild = scrubWrapperEnv;
 
-    buildPhase = ''
-      runHook preBuild
-      ${buildCommand}
-      runHook postBuild
-    '';
-  };
+      buildPhase = ''
+        runHook preBuild
+        ${buildCommand}
+        runHook postBuild
+      '';
+    }
+    // toolchainEnv
+  );
 
   # Devshell that mirrors `drv`'s stdenv env (same buildInputs +
   # setup-hooks + NIX_CFLAGS_COMPILE/NIX_LDFLAGS/PKG_CONFIG_PATH),
@@ -240,16 +254,7 @@ let
     # duplicating build recipes. Consumers pull it out with
     # `nix eval --raw .#<attr>-shell.passthru.buildCommand`.
     passthru.buildCommand = buildCommand;
-    shellHook = scrubWrapperEnv + ''
-      export NIXGG_ROOT="${nixgg}"
-      export NIXGG_COMPILER_ROOT="${gcc}"
-      export NIXGG_BASH_ROOT="${bash}"
-      export NIXGG_COREUTILS_ROOT="${coreutils}"
-      export NIXGG_GNUMAKE_ROOT="${gnumake}"
-      export NIXGG_REAL_CC="${gcc}/bin/g++"
-      export NIXGG_NIX="${patchedNix}/bin/nix"
-      export NIXGG_NIX_HELPERS="${nixHelpers}"
-    '';
+    shellHook = scrubWrapperEnv + toolchainEnvShellHook;
   };
 in
 {

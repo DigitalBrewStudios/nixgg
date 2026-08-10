@@ -6,7 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/tbereknyei/nixgg/internal/classify"
 	"github.com/tbereknyei/nixgg/internal/dispatch"
 	"github.com/tbereknyei/nixgg/internal/drvref"
 	"github.com/tbereknyei/nixgg/internal/expr"
@@ -56,29 +55,11 @@ func Link(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layo
 
 	// Classify each input.
 	altPrefix := altStorePrefix(cfg.Store)
-	linkInputs := make([]expr.Input, 0, len(inputs))
-	jsonInputs := make([]expr.JSONDrvInput, 0, len(inputs))
-	for _, in := range inputs {
-		c := classify.Target(in, altPrefix, l)
-		switch c.Kind {
-		case classify.Store:
-			ni, ji := storeInput(c, in)
-			linkInputs = append(linkInputs, ni)
-			jsonInputs = append(jsonInputs, ji)
-		case classify.Thunk:
-			linkInputs = append(linkInputs, expr.Input{
-				Kind: "nix", Ref: c.Ref, Name: filepath.Base(in),
-			})
-		case classify.Drv:
-			// Sandbox-mode input: previous shim produced a .drv here.
-			// Only meaningful when we're also in sandbox mode.
-			jsonInputs = append(jsonInputs, expr.JSONDrvInput{
-				Kind: "drv", Ref: c.Ref, Name: filepath.Base(in),
-			})
-		default:
-			logf("link passthrough: can't model input %s (%s)", in, c.Reason())
-			return Passthrough(realTool, args)
-		}
+	linkInputs, jsonInputs, err, ok := classifyInputs(inputs, altPrefix, l, "link", func() error {
+		return Passthrough(realTool, args)
+	})
+	if !ok {
+		return err
 	}
 
 	wrapperEnvJSON, err := wrapperenv.JSON()
@@ -92,15 +73,19 @@ func Link(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layo
 		return linkSandbox(cfg, tool, output, jsonInputs, flags, group, storeDeps, wrapperEnvJSON)
 	}
 
+	wrapperEnv, err := decodeStringMap(wrapperEnvJSON)
+	if err != nil {
+		return err
+	}
 	e := expr.Link(expr.LinkParams{
-		Helpers:        cfg.Helpers,
-		Tool:           tool.Basename(),
-		OutName:        filepath.Base(output),
-		Inputs:         linkInputs,
-		Flags:          flags,
-		GroupInputs:    group,
-		StoreDepsJSON:  storedeps.AsJSONArray(storeDeps),
-		WrapperEnvJSON: wrapperEnvJSON,
+		Helpers:     cfg.Helpers,
+		Tool:        tool.Basename(),
+		OutName:     filepath.Base(output),
+		Inputs:      linkInputs,
+		Flags:       flags,
+		GroupInputs: group,
+		StoreDeps:   storeDeps,
+		WrapperEnv:  wrapperEnv,
 	})
 
 	// Links are placeholder-mode by default: the resulting binary isn't
@@ -416,9 +401,6 @@ func linkSandbox(
 		},
 		Env: wrapperEnv,
 	})
-	for _, sd := range storeDeps {
-		drv.Inputs.Srcs = append(drv.Inputs.Srcs, baseNameOf(sd))
-	}
 
 	drvPath, err := sandbox.DerivationAdd(cfg, drv)
 	if err != nil {
@@ -429,22 +411,9 @@ func linkSandbox(
 	}
 	logf("  drv:        %s", drvPath)
 
-	// Submit if this matches the caller's declared target.
-	// NIXGG_SANDBOX_TARGET holds the abs or basename path the outer
-	// build wants exposed as `out`. If unset, submit every link
-	// (which will error on the second submit — user should set
-	// TARGET when they have multiple links).
-	//
-	// mkNixggBuild names the outer drv "bin-<target>.drv" to match
-	// our inner link drv's name, so no rename is needed.
-	target := os.Getenv("NIXGG_SANDBOX_TARGET")
-	if target == "" || matchesTarget(target, output) {
-		if err := sandbox.SubmitOutput(cfg, drvPath, "out"); err != nil {
-			logf("  submit-output: %v", err)
-		} else {
-			logf("  submitted: %s", drvPath)
-		}
-	}
+	// mkNixggBuild names the outer drv "bin-<target>.drv" to match our
+	// inner link drv's name, so no rename is needed.
+	maybeSubmit(cfg, drvPath, output, true)
 	return nil
 }
 
