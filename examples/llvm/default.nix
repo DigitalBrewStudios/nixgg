@@ -149,9 +149,12 @@ let
   };
 in
 {
-  inherit (phase3) drv shell result;
-  # Expose intermediates for isolated smoke tests / debugging.
-  llvm-min-tblgen = phase1.result;
-  llvm-tblgen = phase2.result;
+  inherit (phase3) drv shell result package;
+  # Expose intermediates for isolated smoke tests / debugging — the
+  # full mkNixggBuild attrset, so flake.nix can pull either .result or
+  # .package from these the same way it does for phase3/the top-level
+  # examples.
+  llvm-min-tblgen = phase1;
+  llvm-tblgen = phase2;
   llvm-toolbin = toolbin;
 }

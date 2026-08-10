@@ -256,10 +256,60 @@ let
     passthru.buildCommand = buildCommand;
     shellHook = scrubWrapperEnv + toolchainEnvShellHook;
   };
+  # Consumer entrypoint: `builtins.outputOf` walks the dyn-drv chain
+  # and returns the final compiled artifact as a string with store
+  # context — NOT a derivation. `nix run`, `nix profile install`,
+  # `nix shell`, `nix flake check`, and putting this in another
+  # derivation's buildInputs all inspect `.type`/`.drvPath`/`.outPath`,
+  # none of which a string has. `nix run .#hello` failed with
+  # "attribute 'type' does not exist" for exactly this reason.
+  #
+  # `package` fixes that with one ordinary stdenv.mkDerivation copying
+  # bytes out of the dyn-drv result. Tested directly before writing
+  # this: a plain derivation CAN depend on an outputOf string — Nix
+  # resolves the whole chain (compile drvs -> link/archive drv ->
+  # this wrapper) and the wrapper's closure correctly references the
+  # inner store path (confirmed via `nix path-info --json`). No new
+  # experimental feature, no patched-nix requirement beyond what the
+  # inner build already needs.
+  #
+  # Copy rather than symlink: `nix profile install` should install
+  # this package's own path, not a link one hop into an internal
+  # implementation detail, and `ldd`/`readlink` on the result should
+  # show a path a user recognizes. Cost is the artifact's own size
+  # (16 KB for hello, tens of MB for something llc-sized) — cheap next
+  # to the compile time that produced it.
+  #
+  # mainProgram only makes sense for something FHS placed under bin/
+  # — a link output. An archive (target ending in .a) has no program
+  # to run; leaving meta.mainProgram unset there means `nix run` fails
+  # with Nix's own "does not have meta.mainProgram" rather than
+  # nixgg claiming a program that doesn't exist.
+  isProgram = targetPrefix == "bin-";
+
+  # The dyn-drv chain's final artifact, as a string with store context.
+  # Computed once: used both as the legacy `result` attr and as
+  # `package`'s installPhase source.
+  result = builtins.outputOf drv.outPath "out";
 in
 {
-  inherit drv shell;
-  # Consumer entrypoint: `nix build … .result` walks the dyn-drv
-  # chain and returns the final compiled artifact.
-  result = builtins.outputOf drv.outPath "out";
+  inherit drv shell result;
+
+  # The proper derivation. `nix build .#foo` / `nix run .#foo` /
+  # `nix profile install .#foo` all work against this the way they do
+  # for any other Nix package.
+  package = stdenv.mkDerivation {
+    pname = targetBase;
+    version = "0";
+    dontUnpack = true;
+    installPhase = ''
+      mkdir -p "$out"
+      cp -a ${result}/. "$out/"
+    '';
+    # `.result` stays reachable as `.#foo.result` even though `.#foo`
+    # is now this derivation rather than the string itself.
+    passthru = { inherit drv shell result; };
+  } // lib.optionalAttrs isProgram {
+    meta.mainProgram = targetBase;
+  };
 }

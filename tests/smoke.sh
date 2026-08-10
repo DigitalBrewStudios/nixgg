@@ -84,6 +84,25 @@ for entry in "${SET[@]}"; do
   IFS='|' read -r attr want run <<<"$entry"
   printf '\033[1;36m===== %s =====\033[0m\n' "$attr"
 
+  # Cheap (no-build) check: mainProgram must be set iff the artifact is
+  # meant to be run. A library incorrectly claiming a mainProgram would
+  # send `nix run` at a nonsense path; a binary missing one degrades
+  # silently, since Nix's own pname fallback happens to paper over it
+  # for every current example (pname == the target basename always) —
+  # this is the only check that would catch that regressing.
+  is_lib="0"; [[ "$want" == lib/* ]] && is_lib="1"
+  has_mp="0"
+  "$PATCHED_NIX/bin/nix" eval --no-eval-cache \
+    "$nixgg_root#$attr.meta.mainProgram" >/dev/null 2>&1 && has_mp="1"
+  if [[ "$is_lib" == "1" && "$has_mp" == "1" ]]; then
+    printf '\033[1;31m  BAD META\033[0m %s has meta.mainProgram but is a library\n' "$attr" >&2
+    fail=1; continue
+  fi
+  if [[ "$is_lib" == "0" && "$has_mp" == "0" ]]; then
+    printf '\033[1;31m  BAD META\033[0m %s has no meta.mainProgram; nix run would '"'"'guess'"'"' \n' "$attr" >&2
+    fail=1; continue
+  fi
+
   log="/tmp/nixgg-smoke-$attr.log"
   out=$("$PATCHED_NIX/bin/nix" build --no-eval-cache --no-link \
         --print-out-paths "$nixgg_root#$attr" 2>"$log" | tail -1)
@@ -117,6 +136,23 @@ for entry in "${SET[@]}"; do
     printf '\033[1;32m  OK\033[0m       $out/%s -> %s\n' "$want" "$out_txt"
   else
     printf '\033[1;31m  RAN BUT FAILED\033[0m $out/%s -> %s\n' "$want" "$out_txt" >&2
+    fail=1
+    continue
+  fi
+
+  # Also drive it through `nix run` itself, not just a direct exec of
+  # the path we predicted — this is the actual point of `.package`
+  # being a derivation rather than an outputOf string. Reuses the
+  # build above (same drv, cached), so this is nearly free.
+  runlog="/tmp/nixgg-smoke-$attr-run.log"
+  if "$PATCHED_NIX/bin/nix" run --no-eval-cache "$nixgg_root#$attr" \
+       -- --version >"$runlog" 2>&1 \
+     || "$PATCHED_NIX/bin/nix" run --no-eval-cache "$nixgg_root#$attr" \
+       >>"$runlog" 2>&1; then
+    printf '\033[1;32m  OK\033[0m       nix run .#%s\n' "$attr"
+  else
+    printf '\033[1;31m  NIX RUN FAILED\033[0m .#%s; see %s\n' "$attr" "$runlog" >&2
+    tail -4 "$runlog" >&2
     fail=1
   fi
 done

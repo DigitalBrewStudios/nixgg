@@ -18,9 +18,14 @@ Two modes for producing those derivations:
   builder-rpc-v0 Nix from [#15793][pr], now on master): shims use
   `nix derivation add` to register derivations directly with the
   daemon. The link shim calls `nix store submit-output` for the
-  final target. Consumers reach the compiled artifact via
-  `builtins.outputOf`. This is what makes `nix build .#hello`,
-  `.#lua`, `.#fmt`, `.#mosh` Just Work from a regular flake.
+  final target. `mkNixggBuild` wraps the resulting `builtins.outputOf`
+  string (which has no `.type`/`.drvPath` and so cannot be `nix run`
+  or `nix profile install`ed) in one ordinary `stdenv.mkDerivation`
+  that copies the bytes out — the `.package` attribute, which is what
+  every example's flake output actually is. This is what makes
+  `nix build .#hello`, `.#lua`, `.#fmt`, `.#mosh`, and `nix run` on
+  any of them, Just Work from a regular flake. The raw string is
+  still reachable at `.#hello.result` for anything that wants it.
 
 The whole tool is Go, ships as a single static ELF (~2.9 MB), no
 CGO, no third-party deps.
@@ -51,10 +56,11 @@ export NIXGG_AUTOFORCE=1        # optional; link shim realises inline
 make -j$(nproc)
 
 # sandbox / dyn-drv mode — via flake
-nix build .#hello               # produces bin-hello/bin/hello ELF
-nix build .#lua                 # produces bin-lua/bin/lua ELF (Lua 5.4.7)
-nix build .#fmt                 # produces ar-libfmt.a/lib/libfmt.a
-nix build .#mosh                # produces mosh-server ELF
+nix build .#hello               # produces hello-0/bin/hello ELF
+nix build .#lua                 # produces lua-0/bin/lua ELF (Lua 5.4.7)
+nix build .#fmt                 # produces libfmt.a-0/lib/libfmt.a
+nix build .#mosh                # produces mosh-server-0/bin/mosh-server ELF
+nix run .#hello                 # same artifact, run directly
 ```
 
 Flake packages currently exposed:
@@ -66,9 +72,12 @@ Flake packages currently exposed:
   `buildInputs` / `nativeBuildInputs` / `propagatedBuildInputs` and
   standard setup hooks (cmake, autoreconf, pkg-config) Just Work.
 - `hello`, `lua`, `fmt`, `mosh`, `redis`, `ffmpeg`, `two-phase`,
-  `llvm` — concrete call sites of `mkNixggBuild` you can build
-  directly. Driven from an `exampleDefs` table in flake.nix, so each
-  is one entry rather than three hand-written attrs.
+  `llvm` — concrete call sites of `mkNixggBuild`, exposed as
+  `.package`: a real derivation, so `nix build`/`nix run`/
+  `nix profile install` all work normally. `.#<name>.result` reaches
+  the raw `builtins.outputOf` string underneath, for anyone who wants
+  it directly. Driven from an `exampleDefs` table in flake.nix, so
+  each is one entry rather than three hand-written attrs.
 - `<name>-shell` for each of the above — plain `mkShell`s mirroring
   that example's stdenv env. `nix develop .#<name>-shell` gives native
   mode the exact same buildInputs / setup-hooks the sandbox has; used

@@ -342,10 +342,20 @@
             (_: def: import def.dir ({ inherit mkNixggBuild; } // def.args))
             exampleDefs;
 
-          # .#<name> is the resolved artifact; .#<name>-shell is the
-          # mkShell mirroring the sandbox env, which
+          # .#<name> is a real derivation (mkNixggBuild's `.package`) so
+          # `nix run` / `nix profile install` / flake-check all work the
+          # way they do for any other Nix package. `.#<name>-shell` is
+          # the mkShell mirroring the sandbox env, which
           # tests/drv-equivalence.sh uses to replay the build natively.
-          exampleResults = builtins.mapAttrs (_: e: e.result) examples;
+          #
+          # Both test scripts only care that `--print-out-paths` succeeds
+          # and that the compile/link/archive drvs land in the store —
+          # neither inspects the top-level attr's type, so switching this
+          # from `.result` (a string) to `.package` (a derivation) needs
+          # no change on their side. `.result` is still reachable via
+          # `.#<name>.result` for anyone who was depending on the string
+          # shape directly.
+          exampleResults = builtins.mapAttrs (_: e: e.package) examples;
           exampleShells = pkgs.lib.mapAttrs' (n: e: pkgs.lib.nameValuePair "${n}-shell" e.shell) examples;
         in
         toolchain
@@ -355,9 +365,12 @@
           # Extras an individual example exposes beyond .result/.shell.
           # llvm's two tblgen phases are separately buildable so the
           # chain can be smoke-tested a phase at a time.
-          llvm-min-tblgen = examples.llvm.llvm-min-tblgen;
-          llvm-tblgen = examples.llvm.llvm-tblgen;
-          two-phase-codegen = examples.two-phase.codegen;
+          # Derivations (not outputOf strings) for the same reason
+          # exampleResults above uses .package: `nix build`/`nix run`
+          # these directly for isolated phase smoke-testing.
+          llvm-min-tblgen = examples.llvm.llvm-min-tblgen.package;
+          llvm-tblgen = examples.llvm.llvm-tblgen.package;
+          two-phase-codegen = examples.two-phase.codegen.package;
 
           toolchain-json = toolchainJson;
           env-shell = envShell;

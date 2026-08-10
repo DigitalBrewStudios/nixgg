@@ -47,9 +47,9 @@ let
   };
 in
 {
-  inherit (phase2) drv shell;
-  inherit (phase2) result;
+  inherit (phase2) drv shell result package;
   # Expose phase1 too so we can `nix build .#two-phase-codegen`
-  # independently for smoke tests.
-  codegen = phase1.result;
+  # independently for smoke tests — the full mkNixggBuild attrset, so
+  # flake.nix can pull .package the same way it does for phase2.
+  codegen = phase1;
 }

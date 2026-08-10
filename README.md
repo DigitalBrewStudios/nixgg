@@ -14,7 +14,9 @@ Two modes for producing derivations, same drv-hashes either way:
   at the end. Works with any recent Nix daemon.
 - **Sandbox / dyn-drv** — shims call `nix derivation add` inside a
   `builder-rpc-v0` sandbox and submit the final drv as the outer
-  derivation's output. `nix build .#hello` Just Works.
+  derivation's output. `nix build .#hello` Just Works, and so does
+  `nix run .#hello` — the flake exposes a real derivation, not just
+  a resolvable string.
 
 ## Try it
 
@@ -29,7 +31,9 @@ make          # compiles + auto-force-links via NIXGG_AUTOFORCE=1
 
 # 3. Sandbox: same source, whole graph as dynamic Nix derivations.
 nix build .#hello
-./result/hello
+./result/bin/hello
+# or just:
+nix run .#hello
 
 # 4. Real projects, sandbox mode, out-of-tree sources pinned in flake.lock.
 nix build .#lua         # lua 5.4.7 — 32 TUs, 1 archive, 1 link
