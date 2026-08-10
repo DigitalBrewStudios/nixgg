@@ -441,6 +441,15 @@ func realiseAndLink(exprBody, output string, cfg *toolchain.Config, l paths.Layo
 	}
 	// Re-point output at /nix/store/... (via the alt-store's on-disk
 	// prefix if present).
+	//
+	// Flat basename is correct here, not an oversight: mode.Realise is
+	// compile-only by design (see mode.For's docstring — link/archive
+	// never reach this function), and compile outputs are the one Kind
+	// FHS placement (expr.ArtifactSubdir) deliberately leaves flat. If
+	// that ever changes, this needs the same expr.ArtifactSubdir lookup
+	// storeInput and PromoteToStore already use — this is the third spot
+	// that class of bug lives in, just currently inert.
+	// See TestRealiseCarveoutOutputsAreAlwaysFlat for the pinned check.
 	src := altStoreOnDisk(cfg.Store, built) + "/" + filepath.Base(output)
 	if _, err := os.Stat(src); err != nil {
 		return fmt.Errorf("expected %s after build: %w", src, err)

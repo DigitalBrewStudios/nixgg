@@ -4,6 +4,9 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/tbereknyei/nixgg/internal/expr"
+	"github.com/tbereknyei/nixgg/internal/mode"
 )
 
 // TestRewriteFlagsKeepsForceIncludes guards a bug that already shipped
@@ -174,6 +177,18 @@ func TestParseCompileArgsExplicitLanguage(t *testing.T) {
 			args:   []string{"-c", "a.cc", "-x"},
 			wantOK: false,
 		},
+		{
+			// AC_LINK_IFELSE / AC_RUN_IFELSE compile a conftest straight to
+			// a binary — no -c. This must bail here, into Passthrough,
+			// never reaching mode.For/realiseAndLink: those probes run
+			// under NIXGG_BYPASS=1 at configure time regardless, but this
+			// is the second, independent reason it can't reach the
+			// realise carveout. TestRealiseCarveoutOutputsAreAlwaysFlat's
+			// unreachability claim rests on this holding.
+			name:   "a no -c conftest link line is not a compile",
+			args:   []string{"conftest.c", "-o", "conftest"},
+			wantOK: false,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			src, out, flags, ok := parseCompileArgs(tc.args)
@@ -296,4 +311,60 @@ func TestOnlyDashXLegitimisesAnOddSource(t *testing.T) {
 	}); !ok || src != "pch.h" {
 		t.Errorf("-x path broken: src=%q ok=%v", src, ok)
 	}
+}
+
+// TestRealiseCarveoutOutputsAreAlwaysFlat pins the assumption
+// realiseAndLink's flat-basename path resolution depends on: for every
+// SOURCE filename that sends a compile into mode.Realise, the OUTPUT
+// name that compile actually gets (via defaultOutputName, when the caller
+// passed no -o — the common case for these probes) must be
+// compile-shaped, i.e. expr.ArtifactSubdir of it must be "".
+//
+// realiseAndLink (compile.go) resolves its rebuilt output at
+// storePath + "/" + filepath.Base(output) — no FHS subdir lookup. mode.For
+// is keyed on the SOURCE path, so the property that actually needs to
+// hold is about the OUTPUT defaultOutputName derives from that source —
+// testing ArtifactSubdir of the source name itself is a different claim
+// and the wrong one (a first version of this test made exactly that
+// mistake and failed on cases that were never actually a problem).
+//
+// This is the third place the flat-vs-FHS bug shape lives (see storeInput
+// and PromoteToStore, both of which DO look up the subdir). This one is
+// safe today only because every realise-mode probe compiles to a .o or
+// stays extension-free, both of which ArtifactSubdir leaves flat — and
+// that is exactly what this test checks, rather than trusting the
+// docstring's word for it.
+func TestRealiseCarveoutOutputsAreAlwaysFlat(t *testing.T) {
+	for _, source := range []string{
+		"conftest.c", "conftest.cpp",
+		"testCCompiler.c", "CMakeCXXCompilerId.c",
+		"CheckFunctionExists.c", "CheckIncludeFile.c",
+	} {
+		if mode.For(source) != mode.Realise {
+			t.Fatalf("%q no longer matches mode.Realise — update this test's "+
+				"fixture list, don't just delete the case", source)
+		}
+		out := defaultOutputName(source, nil)
+		if sub := expr.ArtifactSubdir(out); sub != "" {
+			t.Errorf("source %q compiles to %q by default, whose ArtifactSubdir "+
+				"is %q — realiseAndLink's flat filepath.Base(output) lookup no "+
+				"longer agrees with where the artifact actually landed",
+				source, out, sub)
+		}
+	}
+
+	// A link-style probe (AC_LINK_IFELSE / AC_RUN_IFELSE, output
+	// "conftest" with no extension) is NOT a hole in this guard: it never
+	// reaches Compile at all. Those invocations have no -c, so
+	// parseCompileArgs returns ok=false and the call falls to Passthrough
+	// before mode.For is ever consulted — confirmed by reading
+	// parseCompileArgs' hasDashC gate. mode.For's own docstring makes the
+	// same claim for a different reason (bypassed() short-circuits first,
+	// since these run at configure time); both are true simultaneously,
+	// and either one is enough to keep realiseAndLink from ever seeing a
+	// bare "conftest". This is deliberately NOT asserted with an
+	// ArtifactSubdir check the way the .o cases above are, because
+	// ArtifactSubdir("conftest") is genuinely "bin" — the guard here is
+	// unreachability, not a flat name, and the two should not be
+	// conflated.
 }
