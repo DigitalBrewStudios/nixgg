@@ -6,4 +6,9 @@ example/.nixgg/
 example/*.o
 example/hello
 .patched-nix
+# Stray `nix build ... -o patch` output (a likely typo of -o
+# .patched-nix seen recurring in this checkout) — not produced by any
+# script here, but harmless local build output if it appears.
+patch
+patch-man
 result*
