@@ -243,6 +243,21 @@
             inherit system;
           };
 
+          # dynDrvStdenv wraps an EXISTING stdenv (nixpkgsFun's own, or
+          # any package's `.stdenv`) so `pkgs.foo.override { stdenv =
+          # dynDrvStdenv; }` runs foo's unpack/patch/configure/build as
+          # a builder-rpc-v0 derivation while leaving its own
+          # install/fixup/installCheck/meta completely untouched. See
+          # nix/dynDrvStdenv.nix's own top comment for the mechanism
+          # and current scope, and README.md's "Upgrade an existing
+          # nixpkgs package" section for usage.
+          dynDrvStdenv = import ./nix/dynDrvStdenv.nix {
+            inherit (pkgs) lib config;
+            inherit (pkgs) bash coreutils;
+            patchedNix  = patchedNix;
+            nixpkgsPath = nixpkgs;
+          };
+
           # Concrete mkNixggBuild call sites, exposed as flake
           # packages so `nix build .#hello` / `.#lua` Just Work. Each
           # is the resolved final artifact — `builtins.outputOf`
@@ -381,6 +396,11 @@
           # mkNixggBuild is a function; expose so consumers can build
           # their own targets in downstream flakes.
           inherit mkNixggBuild;
+          # dynDrvStdenv is likewise a function (stdenv -> stdenv);
+          # expose so `pkgs.foo.override { stdenv =
+          # nixgg.packages.${system}.dynDrvStdenv; }` works from any
+          # downstream flake, no vendoring required.
+          inherit dynDrvStdenv;
           default = envShell;
         }
       );

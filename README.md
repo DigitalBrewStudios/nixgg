@@ -209,6 +209,65 @@ it when you need to reproduce a sandbox build by hand; it's what
 `tests/drv-equivalence.sh` uses to run the native side under the same
 tool env.
 
+## Upgrade an existing nixpkgs package
+
+`mkNixggBuild` is for builds you write yourself. `dynDrvStdenv` is for
+builds nixpkgs already wrote — any ordinary `stdenv.mkDerivation`
+package gets the builder-rpc-v0 treatment with a one-line `override`,
+no rewriting its `package.nix`. Same prerequisites as `mkNixggBuild`
+(see [Use it in your own project](#use-it-in-your-own-project) above
+for the `nixConfig` block and `patched-nix`):
+
+```nix
+{ pkgs, nixgg }:
+
+let
+  dynDrvStdenv = nixgg.packages.${pkgs.system}.dynDrvStdenv pkgs.stdenv;
+in
+pkgs.hello.override { stdenv = dynDrvStdenv; }
+```
+
+Tested directly against real nixpkgs packages spanning the common
+build-system shapes — `hello` (autotools), `mosh` (autotools +
+`autoreconfHook`), `fmt` (cmake, multi-output `out`+`dev`), `zstd`
+(cmake, 4 outputs, custom `checkPhase` running `ctest`). All four
+build, install to the right outputs, and pass their own
+`installCheckPhase`/`checkPhase` unmodified.
+
+### How it works
+
+`dynDrvStdenv` overrides `mkDerivationFromStdenv` — the same seam
+nixpkgs' own `pkgsMusl`/`pkgsStatic`/ccache use, just with a much
+smaller radius: it changes how a package's derivation gets *built*,
+not the toolchain or the whole package set. Every override is scoped
+to the one package you apply it to via `.override { stdenv = ...; }`;
+nothing else in your `pkgs` set changes.
+
+Under the hood it splits `stdenv.mkDerivation` into two real
+derivations:
+
+1. **Phase 1** (`unpackPhase` through `checkPhase`) runs as a
+   `builder-rpc-v0` sandboxed derivation — real `configurePhase`, real
+   setup hooks (`autoreconfHook`, `cmake`, ...), real `make`/`ninja`,
+   whatever the package actually does. Its result is captured whole
+   and submitted as a dynamic derivation output.
+2. **Phase 2** (`installPhase` through `distPhase`) is an ordinary
+   derivation seeded from phase 1's captured tree, running the
+   package's own unmodified `installPhase`/`fixupPhase`/
+   `installCheckPhase`/`meta` — so multi-output splitting, RPATH
+   shrinking, and install-time checks all still work exactly as
+   nixpkgs wrote them.
+
+**Current scope**: phase 1 runs as a real, unaccelerated build (nixgg's
+shims stay bypassed for the whole phase) — this proves the phase-split
+mechanism generalizes across arbitrary idiomatic packages without
+shipping broken artifacts. Routing individual `cc`/`c++`/`ar` calls
+through nixgg's shims inside phase 1 needs a stub-resolution mechanism
+that doesn't exist yet (see `nix/dynDrvStdenv.nix`'s own comments for
+exactly what's missing); until that lands, the win here is proving
+*any* nixpkgs package can be rebuilt as a dyn-drv chain, not yet
+per-translation-unit acceleration.
+
 ## Architecture
 
 Every shim writes a derivation. Nix does the rest. See
