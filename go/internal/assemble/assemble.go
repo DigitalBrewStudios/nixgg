@@ -2,12 +2,9 @@
 // phase-1 buildPhase and finds every drvref stub the nixgg shims wrote
 // in place of a real artifact.
 //
-// This exists because dynDrvStdenv (unlike mkNixggBuild) has no single
-// target: `make`/`cmake --build` produces a whole tree — dozens of
-// .o/.a/binary outputs — and nothing downstream names them individually
-// the way mkNixggBuild.nix's `target` param does. Assembling the final
-// tree therefore needs to discover every stub by walking, not by
-// argument parsing.
+// dynDrvStdenv (unlike mkNixggBuild) has no single target — the tree
+// can have dozens of shimmed outputs — so stubs are discovered by
+// walking, not by argument parsing.
 package assemble
 
 import (
@@ -22,11 +19,8 @@ import (
 // Stub is one discovered drvref stub: its path relative to the walked
 // root, and the drv that will produce its real content.
 type Stub struct {
-	// RelPath is slash-separated and relative to the walked root —
-	// e.g. "src/hello.o", never an absolute path. The assembly
-	// builder script recreates the tree at this exact relative
-	// location, so a stub found at $root/src/hello.o must resolve to
-	// $out/src/hello.o, not $out/hello.o.
+	// RelPath is slash-separated and relative to root, e.g.
+	// "src/hello.o" — never absolute.
 	RelPath string
 	// DrvPath is the full /nix/store/<hash>-<name>.drv path recorded
 	// in the stub — see drvref.Path.
@@ -34,27 +28,16 @@ type Stub struct {
 }
 
 // skipNames are sandbox-infrastructure entries that are never real
-// build output and must never be treated as ordinary tree content.
-// ".nix-socket" is the builder-rpc-v0 daemon's own unix socket
-// (NIX_REMOTE points at it) — `nix store add --scan` chokes on a
-// socket with "file '...' has an unsupported type" (confirmed
-// directly while building the fmt example by hand, before this
-// walker existed), and opening one with a plain os.Open for stub
-// detection is itself the wrong thing to do to a special file.
-// ".gg-stage" is StageForScan's own working directory (see its
-// docstring for why it must live INSIDE root, not under an
-// os.MkdirTemp("", ...) path — $TMPDIR inside this sandbox already
-// resolves under root, which made an early version of this package
-// copy its own staging directory into itself, recursively, until
-// "file name too long").
+// build output. ".nix-socket" is builder-rpc-v0's own unix socket —
+// `nix store add --scan` can't ingest a socket. ".gg-stage" is
+// StageForScan's own working directory.
 var skipNames = map[string]bool{
 	".nix-socket": true,
 	".gg-stage":   true,
 }
 
-// Walk finds every drvref stub under root. Returns stubs in a
-// deterministic (lexical, filepath.WalkDir's own) order so the
-// resulting JSON drv — and therefore its hash — doesn't depend on
+// Walk finds every drvref stub under root, in deterministic
+// (lexical) order so the resulting JSON drv hash doesn't depend on
 // directory-read ordering.
 func Walk(root string) ([]Stub, error) {
 	var stubs []Stub
@@ -71,10 +54,6 @@ func Walk(root string) ([]Stub, error) {
 		if d.IsDir() {
 			return nil
 		}
-		// drvref.Path only recognizes regular files with the right
-		// magic header; a symlink or anything else returns "" and is
-		// left as ordinary tree content for the caller to copy
-		// verbatim.
 		info, err := d.Info()
 		if err != nil || info.Mode()&os.ModeSymlink != 0 {
 			return nil
@@ -97,30 +76,19 @@ func Walk(root string) ([]Stub, error) {
 }
 
 // StageForScan copies root into a fresh directory INSIDE root itself
-// (named ".gg-stage" — see skipNames), excluding skipNames entries,
-// and returns the staged path.
+// (".gg-stage"), excluding skipNames entries, and returns the staged
+// path.
 //
-// Must be inside root, not under a dest supplied via os.MkdirTemp("",
-// ...): confirmed directly that $TMPDIR inside a builder-rpc-v0
-// sandbox already resolves to a path under $NIX_BUILD_TOP (root
-// itself), so passing an os.MkdirTemp("", ...) result as dest made
-// the staging directory a descendant of root — copying root's own
-// entries into a destination that is ALSO one of root's entries
-// recursed into itself every level ("stage/nixgg-assemble.../stage/
-// nixgg-assemble.../stage/...") until the kernel refused with "file
-// name too long". Nesting the stage dir at a FIXED, excluded name
-// directly under root sidesteps the whole class of bug: it can never
-// be a legitimate ANCESTOR of root, so root's own entries can never
-// recurse into it.
+// Must be inside root, not under an os.MkdirTemp("", ...) dest:
+// $TMPDIR inside a builder-rpc-v0 sandbox resolves under root, so an
+// externally-supplied dest could itself be a descendant of root,
+// making the copy recurse into itself. A fixed, excluded name directly
+// under root can't be an ancestor of root, so this can't happen.
 //
-// `nix store add --scan` cannot ingest root directly regardless:
-// builder-rpc-v0 leaves a live unix socket (.nix-socket, NIX_REMOTE
-// points at it) in $NIX_BUILD_TOP, and --scan chokes on a socket with
-// "file '...' has an unsupported type" (confirmed directly building
-// the fmt example). Deleting it from the live tree first isn't an
-// option either — the caller's own subsequent `nix store add`/
-// `nix derivation add`/`nix store submit-output` calls go through
-// that exact socket.
+// `nix store add --scan` also can't ingest root directly: it leaves a
+// live .nix-socket (NIX_REMOTE points at it) that --scan rejects, and
+// that socket can't be deleted first — the caller's own subsequent
+// nix store add/derivation add/submit-output calls go through it.
 func StageForScan(root string) (string, error) {
 	staged := filepath.Join(root, ".gg-stage")
 	if err := os.MkdirAll(staged, 0o755); err != nil {
@@ -142,10 +110,8 @@ func StageForScan(root string) (string, error) {
 }
 
 // copyRecursive copies a file, directory, or symlink from src to dst,
-// preserving symlinks verbatim (never following them into a copy —
-// nixgg-produced SONAME alias chains like libfoo.so -> libfoo.so.1.2.3
-// must stay symlinks in the assembled tree, not become independent
-// duplicate files).
+// preserving symlinks (SONAME alias chains like libfoo.so ->
+// libfoo.so.1.2.3 must stay symlinks, not become copies).
 func copyRecursive(src, dst string) error {
 	info, err := os.Lstat(src)
 	if err != nil {

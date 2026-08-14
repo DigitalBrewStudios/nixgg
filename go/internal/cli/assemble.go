@@ -1,17 +1,11 @@
 // cmdAssemble implements `nixgg assemble <root> <name>`.
 //
-// This is dynDrvStdenv's phase-1 postBuild step: the buildPhase left
-// behind a tree at <root> full of real files interleaved with drvref
-// stub files (one per cc/c++/ar/link call the nixgg shims intercepted
-// — see internal/drvref). Walk that tree, build ONE assembly drv whose
-// builder restores the tree verbatim then overlays each stub with its
-// real, resolved artifact, and submit it as the outer builder-rpc-v0
-// derivation's "out" output.
-//
-// Replaces dynDrvStdenv.nix's old inline-bash submitBuildTreeScript,
-// which only ever copied the tree through UNRESOLVED — it never walked
-// for stubs, because mkNixggBuild's single-target model gave nixgg
-// nothing to generalize from until this command existed.
+// dynDrvStdenv's phase-1 postBuild step: <root> is a tree of real
+// files interleaved with drvref stubs (one per cc/c++/ar/link call the
+// shims intercepted — see internal/drvref). Walk it, build one
+// assembly drv whose builder restores the tree and overlays each stub
+// with its resolved artifact, and submit it as the outer derivation's
+// "out" output.
 package cli
 
 import (
@@ -41,13 +35,10 @@ func cmdAssemble(args []string) error {
 	}
 	fmt.Fprintf(os.Stderr, "[nixgg assemble] %d stub(s) found under %s\n", len(stubs), root)
 
-	// Stage a filtered copy (drops builder-rpc-v0's own .nix-socket,
-	// and itself — see StageForScan's docstring for why it must live
-	// INSIDE root) before nix store add --scan. Left behind afterward
-	// rather than removed: it's excluded from any FUTURE Walk/
-	// StageForScan call by name, and removing a directory tree that
-	// nix store add just finished hashing/scanning is pure risk for
-	// zero benefit inside a build sandbox that gets torn down anyway.
+	// Staged copy excludes .nix-socket (nix store add --scan can't
+	// ingest it) — see StageForScan. Left behind afterward: it's
+	// self-excluding from future Walk/StageForScan calls, and this
+	// sandbox gets torn down anyway.
 	staged, err := assemble.StageForScan(root)
 	if err != nil {
 		return fmt.Errorf("stage %s for scan: %w", root, err)

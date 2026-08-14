@@ -22,21 +22,12 @@ type BuildParams struct {
 	Stubs   []Stub
 }
 
-// Build assembles the JSONDrv. The builder script:
-//  1. copies TreeSrc (every real file AND every stub placeholder,
-//     verbatim) into $out — this is the tree AS IT WAS, unresolved;
-//  2. overwrites each stub's RelPath with the real artifact from its
-//     producing drv's own "out" output.
-//
-// Step 2 finds that artifact via the SAME convention link.go/archive.go
-// already use to reference each other's outputs (expr.ArtifactSubdir,
-// keyed on the stub's own basename): a stub's RelPath is the filename
-// callers on disk expected (make/cmake chose it, not us), so the
-// producing drv's own $out layout — flat for a .o, lib/ for a .a,
-// bin/ for anything else — is recoverable from that same basename
-// without needing the drv's internal Name (which nixgg's compile/
-// link/archive drvs prefix with "tu-"/"bin-"/"ar-" for their OWN
-// naming reasons, unrelated to this).
+// Build assembles the JSONDrv. The builder script copies TreeSrc (the
+// captured tree, stubs and all) into $out, then overwrites each stub's
+// RelPath with the real artifact from its producing drv's own "out"
+// output — found via the same convention link.go/archive.go use
+// (expr.ArtifactSubdir, keyed on the stub's basename): flat for a .o,
+// lib/ for a .a, bin/ for anything else.
 func Build(p BuildParams) expr.JSONDrv {
 	drvs := map[string]expr.JSONDrvRef{}
 	srcs := []string{expr.StoreBasename(p.Bash), expr.StoreBasename(p.Coreutils), p.TreeSrc}
@@ -89,12 +80,8 @@ func Build(p BuildParams) expr.JSONDrv {
 	}
 }
 
-// shellQuote wraps s in single quotes, escaping any single quote it
-// contains. Every value this package quotes (a downstream placeholder
-// plus a store-internal subdir/basename) is nixgg- or Nix-generated,
-// never arbitrary user text, but a filename inside a real project tree
-// (RelPath's basename) is NOT — quoting defensively here, rather than
-// assuming project filenames stay shell-safe, costs nothing.
+// shellQuote wraps s in single quotes. RelPath's basename comes from
+// the project tree, not nixgg, so it isn't necessarily shell-safe.
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
