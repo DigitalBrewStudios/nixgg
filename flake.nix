@@ -256,6 +256,32 @@
             inherit (pkgs) bash coreutils;
             patchedNix  = patchedNix;
             nixpkgsPath = nixpkgs;
+            inherit system;
+          };
+
+          # dynDrvStdenv applied to real, upstream nixpkgs packages —
+          # unmodified `pkgs.foo.override { stdenv = ...; }`, no
+          # nixgg-specific package.nix anywhere. Distinct names from
+          # the mkNixggBuild-based `hello`/`mosh` examples above (which
+          # build nixgg's own example/ dir and a hand-written mosh
+          # call, respectively) — these instead prove the "upgrade an
+          # EXISTING nixpkgs derivation" story from README.md, so they
+          # need to stay visibly separate rather than shadow those.
+          #
+          # Three distinct build-system shapes, matching what was
+          # verified directly while building dynDrvStdenv (see its own
+          # top comment and README.md's "Upgrade an existing nixpkgs
+          # package" section):
+          #   - hello: plain autotools, doCheck + postInstallCheck.
+          #   - mosh:  autotools + autoreconfHook (setup-hook-injected
+          #            phase — the case that broke a naive hardcoded
+          #            `phases` list).
+          #   - zstd:  cmake, 4 outputs (out/bin/dev/man), a fully
+          #            custom checkPhase running `ctest`.
+          dynDrvExamples = {
+            hello-dyndrv = pkgs.hello.override { stdenv = dynDrvStdenv pkgs.stdenv; };
+            mosh-dyndrv = pkgs.mosh.override { stdenv = dynDrvStdenv pkgs.stdenv; };
+            zstd-dyndrv = pkgs.zstd.override { stdenv = dynDrvStdenv pkgs.stdenv; };
           };
 
           # Concrete mkNixggBuild call sites, exposed as flake
@@ -376,6 +402,7 @@
         toolchain
         // exampleResults   # .#hello .#lua .#fmt .#mosh .#redis .#ffmpeg .#gcc .#two-phase .#llvm
         // exampleShells    # .#<name>-shell for each of the above
+        // dynDrvExamples   # .#hello-dyndrv .#mosh-dyndrv .#zstd-dyndrv
         // {
           # Extras an individual example exposes beyond .result/.shell.
           # llvm's two tblgen phases are separately buildable so the

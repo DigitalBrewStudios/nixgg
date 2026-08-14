@@ -47,6 +47,18 @@
   patchedNix,
   bash,
   coreutils,
+  system, # target platform (e.g. "x86_64-linux") for the JSON drv
+          # submitBuildTreeScript assembles. NOT builtins.currentSystem:
+          # that's an impure builtin, and every OTHER attr in this
+          # file's JSON drv is a pure Nix value known at eval time —
+          # using it here would make `nix build` (no --impure) fail
+          # eval-time with "attribute 'currentSystem' missing", exactly
+          # the way a real flake package consumer invokes this.
+          # Confirmed directly: building .#hello-dyndrv through the
+          # flake (a plain `nix build`, no --impure) failed with
+          # precisely that error before this parameter existed.
+          # mkNixggBuild.nix already takes `system` the same way, for
+          # the same reason.
   nixpkgsPath, # store path of the nixpkgs tree stdenv0 came from, so
                # the private mkDerivationFromStdenv fallback (needed
                # only when the caller's stdenv never set an override —
@@ -130,7 +142,7 @@ let
     treePath=$(nix store add --scan -n "${drvName}-tree" "$NIX_BUILD_TOP/.gg-stage")
     treeBase=$(basename "$treePath")
     printf '{"name":"%s","system":"%s","builder":"%s","args":["-c","export PATH=%s; mkdir -p $out && cp -a /nix/store/%s/. $out/"],"env":{"out":"%s"},"inputs":{"drvs":{},"srcs":["%s","%s","%s"]},"outputs":{"out":{"method":"nar","hashAlgo":"sha256"}},"version":4}' \
-      "${drvName}" "${builtins.currentSystem}" "${bash}/bin/bash" "${coreutils}/bin" "$treeBase" "$placeholder" "${builtins.baseNameOf "${bash}"}" "${builtins.baseNameOf "${coreutils}"}" "$treeBase" \
+      "${drvName}" "${system}" "${bash}/bin/bash" "${coreutils}/bin" "$treeBase" "$placeholder" "${builtins.baseNameOf "${bash}"}" "${builtins.baseNameOf "${coreutils}"}" "$treeBase" \
       > /tmp/gg-inner-json
     drvPath=$(cat /tmp/gg-inner-json | nix derivation add)
     nix store submit-output "$drvPath" out
