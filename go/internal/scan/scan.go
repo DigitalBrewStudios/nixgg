@@ -209,9 +209,24 @@ func runScanner(cc, source string, flags []string) (*Result, []depEntry, error) 
 	// supply our own -MM -MG -MF -.
 	scanFlags := stripDepFlags(flags)
 
-	// gcc -MM -MG emits `target.o: dep1 dep2 \\\n  dep3 ...`. We want
-	// just the deps.
-	cmd := exec.Command(cc, append([]string{"-MM", "-MG", "-MF", "-", source}, scanFlags...)...)
+	// -M (not -MM): gcc's own documented distinction is that -MM omits
+	// headers it classifies as "system headers" (anything gcc's own
+	// preprocessor internally flags 3/3-4 in -E output, e.g. `# 1
+	// "lib/stddef.h" 1 3 4`) — which is exactly the gnulib
+	// substitute-header trick: a directory ahead of gcc's own
+	// system-include search order supplies e.g. lib/stddef.h in place
+	// of the real one, and the preprocessor still marks the RESULT
+	// "system" because of *where* it was found, not how it was
+	// #include-d. -MM then silently drops it, staging a source tree
+	// missing that header — confirmed directly: `-MM -MG` omitted
+	// hello's own lib/stddef.h from closeout.c's dep list (though NOT
+	// from hello.c's — a different #include chain happened to avoid
+	// the system marking there), producing "implicit declaration of
+	// function 'gl_unreachable'" three build stages removed from the
+	// real cause. -M includes every header regardless of that
+	// classification; -MG (accept a missing header as a bare name
+	// rather than erroring) still applies.
+	cmd := exec.Command(cc, append([]string{"-M", "-MG", "-MF", "-", source}, scanFlags...)...)
 	cmd.Stderr = nil // best-effort — we tolerate cc's warnings
 	out, err := cmd.Output()
 	if err != nil {

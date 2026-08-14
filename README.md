@@ -222,17 +222,20 @@ for the `nixConfig` block and `patched-nix`):
 { pkgs, nixgg }:
 
 let
-  dynDrvStdenv = nixgg.packages.${pkgs.system}.dynDrvStdenv pkgs.stdenv;
+  dynDrvStdenv = nixgg.packages.${pkgs.system}.dynDrvStdenv { stdenv = pkgs.stdenv; };
 in
 pkgs.hello.override { stdenv = dynDrvStdenv; }
 ```
 
 Tested directly against real nixpkgs packages spanning the common
 build-system shapes — `hello` (autotools), `mosh` (autotools +
-`autoreconfHook`), `fmt` (cmake, multi-output `out`+`dev`), `zstd`
-(cmake, 4 outputs, custom `checkPhase` running `ctest`). All four
-build, install to the right outputs, and pass their own
-`installCheckPhase`/`checkPhase` unmodified.
+`autoreconfHook`), `zstd` (cmake, 4 outputs, custom `checkPhase`
+running `ctest`, plus a package that execs one of its own binaries
+mid-build — see below). All build, install to the right outputs, run
+real per-translation-unit shim acceleration (every `cc`/`c++`/`ar`
+call becomes its own content-addressed derivation, same as
+`mkNixggBuild`), and pass their own `installCheckPhase`/`checkPhase`
+unmodified.
 
 ### How it works
 
@@ -246,27 +249,94 @@ nothing else in your `pkgs` set changes.
 Under the hood it splits `stdenv.mkDerivation` into two real
 derivations:
 
-1. **Phase 1** (`unpackPhase` through `checkPhase`) runs as a
-   `builder-rpc-v0` sandboxed derivation — real `configurePhase`, real
-   setup hooks (`autoreconfHook`, `cmake`, ...), real `make`/`ninja`,
-   whatever the package actually does. Its result is captured whole
-   and submitted as a dynamic derivation output.
-2. **Phase 2** (`installPhase` through `distPhase`) is an ordinary
-   derivation seeded from phase 1's captured tree, running the
-   package's own unmodified `installPhase`/`fixupPhase`/
+1. **Phase 1** (`unpackPhase` through `buildPhase`) runs as a
+   `builder-rpc-v0` sandboxed derivation with nixgg's shims live on
+   `PATH` — real `configurePhase`, real setup hooks (`autoreconfHook`,
+   `cmake`, ...), real `make`/`ninja`, whatever the package actually
+   does, with every `cc`/`c++`/`ar` invocation turned into its own
+   dynamic derivation exactly like `mkNixggBuild`. `nixgg assemble`
+   then walks the resulting tree, resolves every shimmed output, and
+   submits the whole tree as one dynamic derivation output.
+2. **Phase 2** (`checkPhase` through `distPhase`) is an ordinary
+   derivation seeded from phase 1's fully-resolved tree, running the
+   package's own unmodified `checkPhase`/`installPhase`/`fixupPhase`/
    `installCheckPhase`/`meta` — so multi-output splitting, RPATH
-   shrinking, and install-time checks all still work exactly as
-   nixpkgs wrote them.
+   shrinking, `ctest`/test-suite execution, and install-time checks
+   all still work exactly as nixpkgs wrote them, against real
+   binaries (not unresolved stubs).
 
-**Current scope**: phase 1 runs as a real, unaccelerated build (nixgg's
-shims stay bypassed for the whole phase) — this proves the phase-split
-mechanism generalizes across arbitrary idiomatic packages without
-shipping broken artifacts. Routing individual `cc`/`c++`/`ar` calls
-through nixgg's shims inside phase 1 needs a stub-resolution mechanism
-that doesn't exist yet (see `nix/dynDrvStdenv.nix`'s own comments for
-exactly what's missing); until that lands, the win here is proving
-*any* nixpkgs package can be rebuilt as a dyn-drv chain, not yet
-per-translation-unit acceleration.
+### Packages that exec their own binaries mid-build
+
+A handful of build systems (cmake's `add_custom_target(... DEPENDS
+some-tool)` being the common case) compile a helper tool and
+immediately exec it as part of the same build — zstd's
+`contrib/gen_html` renders `zstd_manual.html` this way. Inside a
+`builder-rpc-v0` sandbox that fails: the shim's link step for the
+helper leaves an unresolved placeholder in place of a real executable
+(nothing inside the sandbox resolves dynamic-derivation outputs
+synchronously), so `./gen_html` errors with "Permission denied".
+
+Fix it with the same phase-chaining pattern `mkNixggBuild`'s own
+`examples/two-phase` and `examples/llvm` already use: build the helper
+standalone via `mkNixggBuild` first, then patch the wrapped package's
+build graph to call that already-resolved binary instead of building
+its own. The patch has to go through `dynDrvStdenv`'s
+`extraPhase1Attrs` parameter, not a plain `.overrideAttrs` — nixpkgs'
+own `.override`/`.overrideAttrs` reapplication contract always
+re-invokes the package function with its *original*, unpatched attrs
+first, so an attrs-level patch applied via `.overrideAttrs` can never
+reach phase 1 (confirmed directly: doing it that way produced a
+byte-identical phase-1 derivation to the fully unpatched build).
+`extraPhase1Attrs`/`extraPhase2Attrs` are spliced in before phase 1 is
+computed, at the `dynDrvStdenv { ...; }` call site itself:
+
+```nix
+{ pkgs, mkNixggBuild, dynDrvStdenv }:
+
+let
+  genHtml = mkNixggBuild {
+    pname = "zstd-gen-html";
+    version = "0";
+    src = pkgs.zstd.src;
+    target = "gen_html";
+    buildCommand = ''
+      cd contrib/gen_html
+      g++ -O2 -c gen_html.cpp -o gen_html.o
+      g++ gen_html.o -o gen_html
+    '';
+  };
+in
+pkgs.zstd.override {
+  stdenv = dynDrvStdenv {
+    stdenv = pkgs.stdenv;
+    extraPhase1Attrs = finalAttrs: old: old // {
+      postPatch = old.postPatch + ''
+        substituteInPlace build/cmake/contrib/gen_html/CMakeLists.txt \
+          --replace-fail \
+            'add_executable(gen_html ''${GENHTML_DIR}/gen_html.cpp)' \
+            "" \
+          --replace-fail \
+            'DEPENDS gen_html COMMENT "Update zstd manual")' \
+            'COMMENT "Update zstd manual")' \
+          --replace-fail \
+            'set(GENHTML_BINARY ''${PROJECT_BINARY_DIR}/gen_html''${CMAKE_EXECUTABLE_SUFFIX})' \
+            'set(GENHTML_BINARY ${genHtml.package}/bin/gen_html)'
+      '';
+    };
+  };
+}
+```
+
+See [examples/zstd-dyndrv/default.nix](examples/zstd-dyndrv/default.nix)
+for the full, tested version. `extraPhase1Attrs`'s `old` is phase 1's
+own attrset as `dynDrvStdenv` built it (already carrying the real
+package's `postPatch`, plus dynDrvStdenv's own shim-activation
+`postPatch`/`preBuild`) — not the raw, unmodified `package.nix`
+attrs — so appending to `old.postPatch`, as above, preserves
+everything already there. `extraPhase2Attrs` is the same shape for
+phase 2, mostly for symmetry: phase 2 *is* reachable via an ordinary
+`.overrideAttrs` on the returned package (confirmed directly — only
+phase 1 has the reapplication problem).
 
 ## Architecture
 
@@ -276,6 +346,7 @@ mechanics. See [dyn-drv/NOTES.md](dyn-drv/NOTES.md) for the
 sandbox / dynamic-derivation exploration notes.
 
 ## Requirements
+
 
 - Nix ≥ 2.36 for sandbox mode (needs `builder-rpc-v0` + `nix store
   submit-output`, both merged into NixOS/nix master via

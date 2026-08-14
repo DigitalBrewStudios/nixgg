@@ -438,6 +438,14 @@ func caOutputPlaceholder(drvPath, output string) string {
 // of a store-path basename. Nix's internal constant is `HashLen = 32`.
 const storeHashLen = 32
 
+// CAOutputPlaceholder is caOutputPlaceholder, exported for
+// internal/assemble: assembling a tree of resolved drvref stubs needs
+// the exact same downstream-placeholder substitution link/archive
+// already use for their own "nix" inputs, just driven by a set of
+// (relative path -> drv) pairs discovered by walking a directory
+// instead of by argv parsing.
+func CAOutputPlaceholder(drvPath, output string) string { return caOutputPlaceholder(drvPath, output) }
+
 // OutPlaceholderNix32 is the Nix32-encoded sha256 of "nix-output:out"
 // — the string Nix substitutes for a placeholder-`$out` reference at
 // build time. Since every derivation with a single "out" output

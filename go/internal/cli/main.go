@@ -28,6 +28,8 @@ func Main(args []string) error {
 		return cmdForce(rest)
 	case "env":
 		return cmdEnv(rest)
+	case "assemble":
+		return cmdAssemble(rest)
 	case "-h", "--help", "help":
 		usage()
 		return nil
@@ -46,6 +48,12 @@ func usage() {
   force  [--thunks-dir DIR] [--roots] [target…]
          Materialise thunks. Only needed if you built without
          NIXGG_AUTOFORCE=1 (the link shim's inline realise hook).
+
+  assemble <root> <name>
+         Sandbox-mode only. Walk <root> for drvref stubs left by shim
+         calls during a whole-tree build (dynDrvStdenv's phase 1),
+         build one drv that restores the tree and resolves every
+         stub, and submit it as this derivation's "out" output.
 
 The usual flow doesn't call nixgg at all after env:
 

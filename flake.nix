@@ -253,7 +253,9 @@
           # nixpkgs package" section for usage.
           dynDrvStdenv = import ./nix/dynDrvStdenv.nix {
             inherit (pkgs) lib config;
-            inherit (pkgs) bash coreutils;
+            inherit (pkgs) bash coreutils gnumake;
+            gcc         = toolchain.gcc;
+            nixgg       = nixggBin;
             patchedNix  = patchedNix;
             nixpkgsPath = nixpkgs;
             inherit system;
@@ -277,11 +279,28 @@
           #            phase — the case that broke a naive hardcoded
           #            `phases` list).
           #   - zstd:  cmake, 4 outputs (out/bin/dev/man), a fully
-          #            custom checkPhase running `ctest`.
+          #            custom checkPhase running `ctest` — AND the
+          #            "exec one of its own binaries mid-build" case
+          #            (contrib/gen_html). Plain `pkgs.zstd.override {
+          #            stdenv = dynDrvStdenv { stdenv = pkgs.stdenv; }; }`
+          #            fails with "./gen_html: Permission denied" —
+          #            confirmed directly — because gen_html is itself
+          #            an unresolved drvref stub at the moment zstd's
+          #            own cmake graph tries to exec it, and no plain
+          #            nixpkgs-level `.overrideAttrs` can reach phase1
+          #            to patch it (see examples/zstd-dyndrv/default.nix
+          #            for exactly why). Fixed via dynDrvStdenv's
+          #            extraPhase1Attrs escape hatch — a phase-chained
+          #            mkNixggBuild call pre-builds gen_html, and
+          #            extraPhase1Attrs's postPatch points zstd's own
+          #            cmake at that already-resolved binary instead of
+          #            letting cmake build+exec its own.
           dynDrvExamples = {
-            hello-dyndrv = pkgs.hello.override { stdenv = dynDrvStdenv pkgs.stdenv; };
-            mosh-dyndrv = pkgs.mosh.override { stdenv = dynDrvStdenv pkgs.stdenv; };
-            zstd-dyndrv = pkgs.zstd.override { stdenv = dynDrvStdenv pkgs.stdenv; };
+            hello-dyndrv = pkgs.hello.override { stdenv = dynDrvStdenv { stdenv = pkgs.stdenv; }; };
+            mosh-dyndrv = pkgs.mosh.override { stdenv = dynDrvStdenv { stdenv = pkgs.stdenv; }; };
+            zstd-dyndrv = import ./examples/zstd-dyndrv {
+              inherit pkgs mkNixggBuild dynDrvStdenv;
+            };
           };
 
           # Concrete mkNixggBuild call sites, exposed as flake
