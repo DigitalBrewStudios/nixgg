@@ -326,9 +326,30 @@ hash was identical with/without a group-B-only `installFlags`).
   user's explicit priority ("configurePhase... that's the most
   expensive and is the phase that matters"). NOT a general N-way
   phase splitter — task #47's original framing suggested that, but
-  it's deliberately deferred. If useful later, it would repeat this
-  same `ggtree`-snapshot + path-rewrite pattern once per additional
-  boundary.
+  it's deliberately deferred.
+
+  Investigated whether a build/install split (caching buildPhase
+  itself, so e.g. an `installFlags`-only change skips recompilation
+  too) could reuse this same plain-CA-derivation pattern. It can't,
+  cleanly: unlike the configure/build boundary, real ELF binaries
+  exist by the time build finishes, and they have RPATH baked in at
+  LINK time pointing at that group's own output paths — text
+  substitution (`pathRewriteScript`'s `sed`) can't touch ELF dynamic
+  sections, so a build/install split would need real `patchelf`-based
+  rewriting, the same class of mechanism `dynDrvStdenv`'s
+  `elfRpathFixupScript` already solves — but not reusable verbatim,
+  since that script's glue is tied to dynDrvStdenv's specific
+  placeholder-output scheme, not a general "N real outputs, two
+  groups" shape. Confirmed via nixpkgs' own `patchelf` setup-hook
+  (`fixupPhase`'s `fixupOutputHooks`): it only *shrinks* RPATH
+  (drops entries with no `DT_NEEDED` in the dir), it never adds or
+  corrects one — so a naive restore-without-ELF-rewrite would silently
+  produce a binary missing a real runtime dependency, not a build
+  failure. Net: a build/install split is much closer in complexity to
+  `dynDrvStdenv`'s than to this file's — plain derivations plus a new
+  ELF-rewrite pass, not a copy-paste of either existing mechanism.
+  Worth it only if buildPhase-level caching turns out to matter enough
+  in practice to justify that cost; not started.
 - `extraGroupBAttrs` is basically unnecessary for the same reason
   dynDrvStdenv's `extraPhase2Attrs` is — group B IS reachable via a
   plain `.overrideAttrs` on the returned package. Kept for symmetry.
