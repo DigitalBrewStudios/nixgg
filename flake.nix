@@ -304,17 +304,13 @@
           };
 
           # configureCacheStdenv splits stdenv.mkDerivation at the
-          # CONFIGURE/BUILD boundary instead of dynDrvStdenv's
-          # build/install boundary — see nix/configureCacheStdenv.nix's
-          # own top comment for why this needs no builder-rpc-v0/shims
-          # at all (no per-TU discovery happens at this granularity).
-          # Same two build-system shapes as dynDrvStdenv's hello/zstd
-          # examples above, chosen for the same reason: autotools
-          # single-output, and cmake multi-output (out/bin/dev/man).
-          # Unlike zstd-dyndrv, zstd-cache needs NO extraPhase1Attrs
-          # gen_html workaround — group A has no sandbox/shims, so
-          # zstd's own cmake graph exec-ing contrib/gen_html mid-build
-          # is just an ordinary native exec, no drvref-stub hazard.
+          # configure/build boundary, not build/install like
+          # dynDrvStdenv — see nix/configureCacheStdenv.nix's top
+          # comment for the mechanism. hello covers autotools,
+          # single-output; zstd covers cmake, multi-output
+          # (out/bin/dev/man). Unlike zstd-dyndrv, zstd-cache needs no
+          # extraPhase1Attrs workaround for gen_html, since there's no
+          # sandbox for it to trip over.
           configureCacheStdenv = import ./nix/configureCacheStdenv.nix {
             inherit (pkgs) lib config stdenvNoCC;
             nixpkgsPath = nixpkgs;
@@ -323,21 +319,12 @@
           configureCacheExamples = {
             hello-cache = pkgs.hello.override { stdenv = configureCacheStdenv { stdenv = pkgs.stdenv; }; };
             zstd-cache = pkgs.zstd.override { stdenv = configureCacheStdenv { stdenv = pkgs.stdenv; }; };
-            # Proves the real early-cutoff win: configureSrcFilter
-            # shrinks group A's own `src` input to only the files
-            # configure reads (see configureSrcFilter.nix), so an
-            # edit to a file the autotools preset excludes (e.g.
-            # src/*.c) never changes group A's input at all — group A
-            # doesn't even re-run. Kept separate from the plain
-            # hello-cache above (which stays filter-free) since a
-            # filter's soundness is package-specific and this is the
-            # one example that's actually been verified against
-            # hello's real Makefile.am/configure.ac layout.
-            #
-            # existenceStubs: "src/hello.c" is hello's own
-            # AC_CONFIG_SRCDIR argument (see configureSrcFilterPresets.nix's
-            # own comment) — without it, hello's generated configure
-            # fails outright with "cannot find sources (src/hello.c)".
+            # Same as hello-cache, but with configureSrcFilter: an
+            # edit to a source file the autotools preset excludes
+            # never touches configure's own input, so configure
+            # doesn't rerun. existenceStubs needs "src/hello.c" —
+            # that's hello's AC_CONFIG_SRCDIR argument, checked for
+            # existence only by the generated configure script.
             hello-cache-filtered = pkgs.hello.override {
               stdenv = configureCacheStdenv {
                 stdenv = pkgs.stdenv;

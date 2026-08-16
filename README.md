@@ -341,12 +341,12 @@ phase 1 has the reapplication problem).
 ## Cache an existing package's configure step
 
 `dynDrvStdenv` accelerates the whole build/install split. Sometimes
-you don't need that — you just want an expensive `configurePhase` to
-stop rerunning every time you tweak something downstream (an
-`installFlags`, a `postInstall`, etc.). `configureCacheStdenv` splits
-`stdenv.mkDerivation` at the configure/build boundary instead, and
-needs no `builder-rpc-v0` sandbox at all — configure discovers
-nothing unknown, so there's nothing to shim:
+you don't need that much — you just want configure to stop rerunning
+every time you touch something downstream, like `installFlags` or a
+`postInstall`. `configureCacheStdenv` splits `stdenv.mkDerivation` at
+the configure/build boundary instead. It doesn't need the
+`builder-rpc-v0` sandbox at all, because configure isn't compiling
+anything unknown — there's nothing to shim:
 
 ```nix
 { pkgs, nixgg }:
@@ -357,18 +357,17 @@ in
 pkgs.hello.override { stdenv = configureCacheStdenv { stdenv = pkgs.stdenv; }; }
 ```
 
-A group-B-only attr change (anything after configure) never reruns
-or rehashes the configure step. Content-addressing group A's own
-output also means a rerun that happens to reproduce byte-identical
-output collapses back to the same store path, so downstream doesn't
-rebuild either.
+Changing anything after configure — `installFlags`, `postInstall`,
+whatever — no longer reruns or rehashes configure. Configure's own
+output is also content-addressed, so if a rerun happens to produce
+identical output, the build after it doesn't rerun either.
 
-For the stronger case — an unrelated *source* edit shouldn't rerun
-configure at all — pass `configureSrcFilter` to shrink group A's own
-`src` input down to just the files configure reads, via a small
-content-addressed filter derivation (not `lib.fileset`: that needs a
-real eval-time `Path`, but most packages' `src` is an unrealized
-fetcher derivation):
+For the stronger case — an unrelated source-file edit shouldn't rerun
+configure at all — pass `configureSrcFilter` to shrink configure's own
+`src` down to just the files it reads, via a small content-addressed
+filter derivation. (Not `lib.fileset`: that needs a real path at eval
+time, and most packages' `src` is a fetcher derivation that hasn't
+been built yet.)
 
 ```nix
 let
@@ -386,15 +385,15 @@ pkgs.hello.override {
 ```
 
 `configureSrcFilterPresets` ships starting points for `autotools` and
-`cmake`. They are **not guaranteed correct for every package** — an
-under-inclusive pattern list is a silent correctness bug (a stale
-cached configure output, no error), not a build failure. Verify by
-building, not by inspection: `hello` alone needed patterns for
-`*.in`/`*.mk` templates beyond the obvious `Makefile.am`/`configure.ac`,
-plus treating gettext's `po/` directory as all-or-nothing.
-`existenceStubs` is for the opposite case — a file only ever tested
-for *existence*, never read for content (autoconf's
-`AC_CONFIG_SRCDIR` is the common one) — safe to stub empty.
+`cmake`, and they're just that — starting points, not guarantees. An
+under-inclusive pattern list doesn't fail loudly; it silently caches a
+stale configure output. Test by building the package, not by reading
+the pattern list. `hello` alone needed more than the obvious
+`Makefile.am`/`configure.ac` — also `*.in`/`*.mk` templates, and its
+whole `po/` directory, which is easier to include wholesale than to
+enumerate. `existenceStubs` covers the opposite case: a file that's
+only ever checked for existence, never read, like autoconf's
+`AC_CONFIG_SRCDIR` — safe to stub out as empty.
 
 ## Architecture
 
