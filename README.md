@@ -395,6 +395,19 @@ enumerate. `existenceStubs` covers the opposite case: a file that's
 only ever checked for existence, never read, like autoconf's
 `AC_CONFIG_SRCDIR` — safe to stub out as empty.
 
+Not every cmake package can use `configureSrcFilter` at all: if a
+package's own `CMakeLists.txt` collects its sources with
+`file(GLOB ...)` over a whole directory (zstd does this), configure
+needs that entire directory present regardless of any filter — there's
+no smaller include list that helps. `fmt` lists its sources
+explicitly, so filtering it actually does something; see
+`.#fmt-cache-filtered` for the working example, and
+[tests/configure-cache-cutoff.sh](tests/configure-cache-cutoff.sh) for
+an automated check that the caching itself holds (not just that the
+build succeeds): it edits a file the filter excludes and one it
+includes, and asserts configure's own output only changes for the
+latter.
+
 ## Architecture
 
 Every shim writes a derivation. Nix does the rest. See

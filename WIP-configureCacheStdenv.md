@@ -343,11 +343,17 @@ hash was identical with/without a group-B-only `installFlags`).
   own binaries mid-build" case dynDrvStdenv's zstd-dyndrv example had
   to work around) — a configure-time equivalent might exist in some
   package but hasn't been hit yet.
-- Test coverage exists: `tests/smoke.sh`'s `CONFIGCACHE` set
-  (hello-cache/zstd-cache/hello-cache-filtered/fmt-cache-filtered),
-  same `nix run`-only verification pattern as `DYNDRV`. This only
-  checks "does it still build and run" — the actual early-cutoff/
-  caching behavior has no automated test, only the manual `nix
-  show-derivation`/build-path comparisons documented above. Worth
-  automating (e.g. a script that builds twice with a controlled src
-  edit and asserts on drv/output hashes) if this gets more use.
+- Test coverage exists at two levels: `tests/smoke.sh`'s `CONFIGCACHE`
+  set (hello-cache/zstd-cache/hello-cache-filtered/fmt-cache-filtered)
+  checks "does it still build and run", same `nix run`-only
+  verification pattern as `DYNDRV`. `tests/configure-cache-cutoff.sh`
+  checks the actual caching mechanism: for `hello` and `fmt`, it
+  constructs the package three ways (baseline, an edit to a file
+  `configureSrcFilter` excludes, an edit to a file it includes) and
+  asserts group A's `ggtree` output path is unchanged for the excluded
+  edit and changed for the included one — automating exactly the
+  manual `nix show-derivation`/build-path comparisons this doc
+  describes above. Verified the negative-case detection works too:
+  temporarily pointing the "excluded" edit at a file the filter
+  actually includes made the script fail with the expected message,
+  not silently pass.
