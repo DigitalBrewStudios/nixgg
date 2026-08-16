@@ -303,6 +303,52 @@
             };
           };
 
+          # configureCacheStdenv splits stdenv.mkDerivation at the
+          # CONFIGURE/BUILD boundary instead of dynDrvStdenv's
+          # build/install boundary — see nix/configureCacheStdenv.nix's
+          # own top comment for why this needs no builder-rpc-v0/shims
+          # at all (no per-TU discovery happens at this granularity).
+          # Same two build-system shapes as dynDrvStdenv's hello/zstd
+          # examples above, chosen for the same reason: autotools
+          # single-output, and cmake multi-output (out/bin/dev/man).
+          # Unlike zstd-dyndrv, zstd-cache needs NO extraPhase1Attrs
+          # gen_html workaround — group A has no sandbox/shims, so
+          # zstd's own cmake graph exec-ing contrib/gen_html mid-build
+          # is just an ordinary native exec, no drvref-stub hazard.
+          configureCacheStdenv = import ./nix/configureCacheStdenv.nix {
+            inherit (pkgs) lib config stdenvNoCC;
+            nixpkgsPath = nixpkgs;
+          };
+          configureSrcFilterPresets = import ./nix/configureSrcFilterPresets.nix;
+          configureCacheExamples = {
+            hello-cache = pkgs.hello.override { stdenv = configureCacheStdenv { stdenv = pkgs.stdenv; }; };
+            zstd-cache = pkgs.zstd.override { stdenv = configureCacheStdenv { stdenv = pkgs.stdenv; }; };
+            # Proves the real early-cutoff win: configureSrcFilter
+            # shrinks group A's own `src` input to only the files
+            # configure reads (see configureSrcFilter.nix), so an
+            # edit to a file the autotools preset excludes (e.g.
+            # src/*.c) never changes group A's input at all — group A
+            # doesn't even re-run. Kept separate from the plain
+            # hello-cache above (which stays filter-free) since a
+            # filter's soundness is package-specific and this is the
+            # one example that's actually been verified against
+            # hello's real Makefile.am/configure.ac layout.
+            #
+            # existenceStubs: "src/hello.c" is hello's own
+            # AC_CONFIG_SRCDIR argument (see configureSrcFilterPresets.nix's
+            # own comment) — without it, hello's generated configure
+            # fails outright with "cannot find sources (src/hello.c)".
+            hello-cache-filtered = pkgs.hello.override {
+              stdenv = configureCacheStdenv {
+                stdenv = pkgs.stdenv;
+                configureSrcFilter = {
+                  includePatterns = configureSrcFilterPresets.autotools;
+                  existenceStubs = [ "src/hello.c" ];
+                };
+              };
+            };
+          };
+
           # Concrete mkNixggBuild call sites, exposed as flake
           # packages so `nix build .#hello` / `.#lua` Just Work. Each
           # is the resolved final artifact — `builtins.outputOf`
@@ -422,6 +468,7 @@
         // exampleResults   # .#hello .#lua .#fmt .#mosh .#redis .#ffmpeg .#gcc .#two-phase .#llvm
         // exampleShells    # .#<name>-shell for each of the above
         // dynDrvExamples   # .#hello-dyndrv .#mosh-dyndrv .#zstd-dyndrv
+        // configureCacheExamples   # .#hello-cache .#zstd-cache .#hello-cache-filtered
         // {
           # Extras an individual example exposes beyond .result/.shell.
           # llvm's two tblgen phases are separately buildable so the
@@ -447,6 +494,9 @@
           # nixgg.packages.${system}.dynDrvStdenv; }` works from any
           # downstream flake, no vendoring required.
           inherit dynDrvStdenv;
+          # Same reasoning as dynDrvStdenv above.
+          inherit configureCacheStdenv;
+          inherit configureSrcFilterPresets;
           default = envShell;
         }
       );

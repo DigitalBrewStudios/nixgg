@@ -167,6 +167,77 @@ stdenv0.override (
           )
         );
 
+        # Phase 1's own derivation must declare exactly one output
+        # ("out") — submit-output's ".drv" naming convention requires
+        # it (see `name` below) — but build systems bake bin/dev/man/
+        # etc. install paths into the Makefile/CMakeCache at configure
+        # time via multiple-outputs.sh's `_overrideFirst` chain, which
+        # silently collapses every output name to "$out" unless a
+        # same-named bash var already exists before configurePhase
+        # runs. Give each of the package's REAL non-"out" outputs its
+        # own subdir of phase 1's one tree, so phase 2 can split the
+        # restored tree back apart into its real outputs (see its
+        # postInstall below). Confirmed necessary directly: without
+        # this, zstd-dyndrv's cmake install baked every output —
+        # including bin/zstd — under /nonexistent itself, and phase
+        # 2's blind `cp ... $out/` only ever populated "out", leaving
+        # "bin"/"dev"/"man" empty.
+        realOutputs = probeArgs.outputs or [ "out" ];
+        extraOutputs = builtins.filter (o: o != "out") realOutputs;
+        outputPlaceholder = o: if o == "out" then "/nonexistent" else "/nonexistent-${o}";
+
+        # Phase 2's restore/split step, generated once so it stays in
+        # sync with outputPlaceholder above: for every real output,
+        # make the real output dir and copy its placeholder subtree
+        # (installed by phase 2's own installPhase, DESTDIR-relative)
+        # into it. `v`/`ph` are built via string concatenation, not
+        # Nix's `${}` antiquotation, so the emitted script contains a
+        # literal shell variable reference (e.g. "$bin"), not a
+        # Nix-side interpolation of it.
+        restoreOutputsScript = lib.concatMapStrings (
+          o:
+          let
+            v = "$" + o;
+            ph = outputPlaceholder o;
+          in
+          "mkdir -p \"${v}\"\ncp -a \"$DESTDIR${ph}/.\" \"${v}/\"\n"
+        ) realOutputs;
+
+        # cc-wrapper's ld-wrapper bakes a self-rpath into every linked
+        # binary/shared-lib at LINK time (phase 1's buildPhase), using
+        # whatever output path was live then — one of the placeholders
+        # above, e.g. "/nonexistent/lib" for zstd's libzstd.so (its
+        # outputLib defaults to "out", same placeholder as $out
+        # itself). Confirmed directly: without this rewrite, the
+        # dangling placeholder rpath survives into phase 2, and
+        # fixupPhase's own patchelf-based shrinkRPath step (correctly)
+        # drops it since nothing exists at that literal path — leaving
+        # zstd's `bin/zstd` unable to find libzstd.so.1 at runtime,
+        # `nix run` failing with "cannot open shared object file".
+        # Longest-placeholder-first order (extraOutputs before "out")
+        # matters: "/nonexistent" is a literal prefix of
+        # "/nonexistent-bin", so substituting it first would also
+        # mangle the longer placeholders.
+        elfRpathFixupScript =
+          let
+            sedOrder = extraOutputs ++ [ "out" ];
+            sedExprs = lib.concatMapStrings (
+              o: " -e \"s|" + outputPlaceholder o + "|$" + o + "|g\""
+            ) sedOrder;
+            outputDirsList = lib.concatMapStrings (o: "\"$" + o + "\" ") realOutputs;
+          in
+          ''
+            while IFS= read -r -d "" gg_f; do
+              gg_rp="$(patchelf --print-rpath "$gg_f" 2>/dev/null)" || continue
+              [ -z "$gg_rp" ] && continue
+              gg_newrp="$(printf '%s' "$gg_rp" | sed${sedExprs})"
+              if [ "$gg_newrp" != "$gg_rp" ]; then
+                chmod u+w "$gg_f"
+                patchelf --set-rpath "$gg_newrp" "$gg_f"
+              fi
+            done < <(find ${outputDirsList} -type f -print0 2>/dev/null)
+          '';
+
         withPhase1Attrs =
           finalAttrs:
           let
@@ -197,6 +268,29 @@ stdenv0.override (
                 # `outputs`.
                 outputs = [ "out" ];
                 out = "/nonexistent";
+              }
+              # Extra outputs (bin/dev/man/...) are plain env vars
+              # here, NOT declared Nix derivation outputs — phase 1
+              # stays single-output. Setting them as ordinary attrs
+              # (same mechanism as `out` above) makes them part of the
+              # build's initial environment, so multiple-outputs.sh's
+              # `_overrideFirst outputBin "bin" "out"` (sourced before
+              # any postPatch/preConfigure runs) sees a non-empty $bin
+              # and points outputBin at it instead of silently
+              # collapsing to "out". Nothing is ever written to these
+              # paths during phase 1 itself — dontInstall=true skips
+              # installPhase, the only phase that would — they only
+              # get baked as literal absolute paths into generated
+              # build files (Makefile/cmake_install.cmake) inside
+              # $NIX_BUILD_TOP, for phase 2's DESTDIR-relative install
+              # to act on later.
+              // builtins.listToAttrs (
+                map (o: {
+                  name = o;
+                  value = outputPlaceholder o;
+                }) extraOutputs
+              )
+              // {
                 # Forced off regardless of what the package requests:
                 # under __structuredAttrs, make-derivation.nix only
                 # honors env-nested attrs, not bare top-level ones like
@@ -281,10 +375,15 @@ stdenv0.override (
                 runHook postGgRestore
               '';
               installFlags = (probeArgs.installFlags or "");
-              postInstall = ''
-                mkdir -p "$out"
-                cp -a "$DESTDIR/nonexistent/." "$out/"
-              '' + (probeArgs.postInstall or "");
+              postInstall = restoreOutputsScript + (probeArgs.postInstall or "");
+              # Must run before fixupPhase's own patchelf-based
+              # rpath-shrinking, which (correctly) drops any rpath
+              # entry pointing at a path that doesn't exist — exactly
+              # what the placeholder rpaths would still be if this
+              # ran any later. postInstall (above) has already split
+              # outputs apart by the time preFixup hooks run, so the
+              # real output paths this substitutes in are populated.
+              preFixup = elfRpathFixupScript + (probeArgs.preFixup or "");
             };
         in
         extraPhase2Attrs finalAttrs base

@@ -338,6 +338,64 @@ phase 2, mostly for symmetry: phase 2 *is* reachable via an ordinary
 `.overrideAttrs` on the returned package (confirmed directly — only
 phase 1 has the reapplication problem).
 
+## Cache an existing package's configure step
+
+`dynDrvStdenv` accelerates the whole build/install split. Sometimes
+you don't need that — you just want an expensive `configurePhase` to
+stop rerunning every time you tweak something downstream (an
+`installFlags`, a `postInstall`, etc.). `configureCacheStdenv` splits
+`stdenv.mkDerivation` at the configure/build boundary instead, and
+needs no `builder-rpc-v0` sandbox at all — configure discovers
+nothing unknown, so there's nothing to shim:
+
+```nix
+{ pkgs, nixgg }:
+
+let
+  configureCacheStdenv = nixgg.packages.${pkgs.system}.configureCacheStdenv;
+in
+pkgs.hello.override { stdenv = configureCacheStdenv { stdenv = pkgs.stdenv; }; }
+```
+
+A group-B-only attr change (anything after configure) never reruns
+or rehashes the configure step. Content-addressing group A's own
+output also means a rerun that happens to reproduce byte-identical
+output collapses back to the same store path, so downstream doesn't
+rebuild either.
+
+For the stronger case — an unrelated *source* edit shouldn't rerun
+configure at all — pass `configureSrcFilter` to shrink group A's own
+`src` input down to just the files configure reads, via a small
+content-addressed filter derivation (not `lib.fileset`: that needs a
+real eval-time `Path`, but most packages' `src` is an unrealized
+fetcher derivation):
+
+```nix
+let
+  configureSrcFilterPresets = nixgg.packages.${pkgs.system}.configureSrcFilterPresets;
+in
+pkgs.hello.override {
+  stdenv = configureCacheStdenv {
+    stdenv = pkgs.stdenv;
+    configureSrcFilter = {
+      includePatterns = configureSrcFilterPresets.autotools;
+      existenceStubs = [ "src/hello.c" ]; # hello's own AC_CONFIG_SRCDIR arg
+    };
+  };
+}
+```
+
+`configureSrcFilterPresets` ships starting points for `autotools` and
+`cmake`. They are **not guaranteed correct for every package** — an
+under-inclusive pattern list is a silent correctness bug (a stale
+cached configure output, no error), not a build failure. Verify by
+building, not by inspection: `hello` alone needed patterns for
+`*.in`/`*.mk` templates beyond the obvious `Makefile.am`/`configure.ac`,
+plus treating gettext's `po/` directory as all-or-nothing.
+`existenceStubs` is for the opposite case — a file only ever tested
+for *existence*, never read for content (autoconf's
+`AC_CONFIG_SRCDIR` is the common one) — safe to stub empty.
+
 ## Architecture
 
 Every shim writes a derivation. Nix does the rest. See

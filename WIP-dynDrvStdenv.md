@@ -120,10 +120,12 @@ behavior), `ca99950` (the real work: per-TU acceleration +
 
 ## What's NOT done / open threads
 
-- **Task #47** (tracked in this session's task list, not yet started):
-  investigate a coarser "one dynamic derivation per stdenv phase"
-  design as an alternative to per-TU — may be useful where full TU
-  tracking is overkill.
+- **Task #47 — resolved, but as a SEPARATE mechanism, not a change to
+  this file.** "One dynamic derivation per stdenv phase" turned out to
+  need no dynamic-derivation machinery at all for the configure/build
+  boundary specifically (no per-TU discovery happens there, so no
+  RPC/sandbox/shims needed) — see `nix/configureCacheStdenv.nix` and
+  `WIP-configureCacheStdenv.md`, its own sibling doc.
 - `extraPhase2Attrs` exists for symmetry with `extraPhase1Attrs` but
   is basically unnecessary — phase 2 IS reachable via a plain
   `.overrideAttrs` on the returned package. Not deeply tested; if it
@@ -131,15 +133,99 @@ behavior), `ca99950` (the real work: per-TU acceleration +
 - Only tested against hello/mosh/zstd. Untested: packages with
   multiple mid-build-exec hazards, packages needing native (non-cmake,
   non-autotools) build systems, cross-compilation.
-- No test suite for `dynDrvStdenv.nix` itself (unlike `mkNixggBuild`,
-  which has `tests/drv-equivalence.sh`) — every verification this
-  session was a manual `nix build` + log inspection. Worth automating
-  if this gets more use.
+- Test coverage now exists: `tests/smoke.sh` runs hello-dyndrv,
+  mosh-dyndrv, zstd-dyndrv alongside the mkNixggBuild examples (quick
+  set by default, no opt-in needed) — see "Test suite" below.
 - Session cwd note: this repo (`~/nixgg`, branch `master`) is where
   all of this work happened. A SEPARATE checkout at
   `~/incremental/nixgg` (branch `nixgg-go`) has unrelated pending
   work (`example/util.cc` edit, untracked `spdlog/`/`zstd/` clones)
   — don't confuse the two.
+
+## Two bugs found and fixed by writing the test suite
+
+Both only bite **multi-output** packages (zstd-dyndrv is the only
+current example with `outputs != ["out"]`) — hello-dyndrv/mosh-dyndrv
+were never affected, since they're single-output already.
+
+1. **Multi-output collapse.** Phase 1 must declare exactly one
+   derivation output (`outputs = ["out"]"`, required by the
+   `.drv`-suffixed submit-output naming convention), but that also
+   meant `$bin`/`$dev`/`$man` etc. never existed as env vars before
+   configurePhase ran — and `multiple-outputs.sh`'s
+   `_overrideFirst outputBin "bin" "out"` chain silently collapses to
+   `$out` whenever the preferred var is unset. cmake baked `$out`-only
+   install paths into `cmake_install.cmake`; phase 2's real install
+   (with the real multi-output env) then wrote into those same
+   `/nonexistent`-baked paths, and the old `postInstall` only ever
+   copied into `$out`. Result: zstd-dyndrv's `bin` output existed but
+   was **empty** — `nix run .#zstd-dyndrv` failed with "No such file
+   or directory" even though the build succeeded.
+
+   Fix: give every real non-`out` output its own placeholder path
+   (`/nonexistent-bin`, `/nonexistent-man`, ...) as a plain env var in
+   phase 1 (not a declared derivation output — phase 1 stays
+   single-output), so `multiple-outputs.sh` picks each one up instead
+   of collapsing. Phase 2's `postInstall` now splits the restored tree
+   back apart per real output (`restoreOutputsScript` in
+   `dynDrvStdenv.nix`).
+
+2. **Dangling self-rpath.** cc-wrapper's `ld-wrapper.sh` bakes a
+   self-rpath into every linked binary/shared-lib AT LINK TIME (phase
+   1's buildPhase) — using whatever placeholder path was live then
+   (e.g. `/nonexistent/lib` for zstd's `libzstd.so`). That placeholder
+   survives verbatim into phase 2; fixupPhase's own patchelf-based
+   rpath-shrinking (correctly) drops any rpath entry pointing
+   somewhere nonexistent. Result: `bin/zstd` couldn't find
+   `libzstd.so.1` at runtime — "cannot open shared object file" — even
+   on an otherwise-correct build.
+
+   Fix: a new `preFixup` step (`elfRpathFixupScript`) walks every file
+   under every real output and `patchelf --set-rpath`s each
+   placeholder substring to the corresponding real output path,
+   BEFORE fixupPhase's own rpath-shrink runs. Longest-placeholder-first
+   substitution order matters (`/nonexistent` is a literal prefix of
+   `/nonexistent-bin`).
+
+Both fixes are in `nix/dynDrvStdenv.nix`; verified directly via `nix
+run .#zstd-dyndrv -- --version` (prints the real CLI banner) and
+zstd's own `ctest`-based checkPhase still passing post-fix.
+
+## Test suite
+
+`tests/smoke.sh` now covers all three dynDrv examples
+(hello-dyndrv/mosh-dyndrv/zstd-dyndrv), always, as part of the default
+`EXAMPLES=quick` run — no separate opt-in needed:
+
+```sh
+tests/smoke.sh                                    # QUICK + all 3 dyndrv examples
+EXAMPLES="zstd-dyndrv" tests/smoke.sh              # just one
+```
+
+Key difference from the QUICK/SLOW mkNixggBuild fixtures: dyndrv
+examples are verified via `nix run`/`nix shell` ONLY, never a direct
+exec of the predicted `$ALT_STORE` disk path. Their baked
+RPATH/RUNPATH entries point at real (non-fixed-output) sibling store
+paths that exist only inside `$ALT_STORE`, not at the real filesystem
+root — the dynamic loader always resolves an absolute RPATH against
+the real root, so direct exec fails with "cannot open shared object
+file" even on a perfectly correct build. Only `nix run`'s private
+mount namespace (bind-mounts `$ALT_STORE` onto `/nix/store`) resolves
+it. `meta.mainProgram` presence is also NOT checked for dyndrv
+entries — that's a property of whatever upstream package got wrapped,
+not something `dynDrvStdenv` controls (confirmed: upstream nixpkgs'
+own `mosh` package sets no `mainProgram` at all).
+
+Also fixed while writing this: `check_example`'s build-output capture
+used to `tail -1` a single line, silently picking the WRONG realized
+output for any multi-output default build (`nix build
+--print-out-paths` prints one line per output, order not guaranteed)
+— now scans all printed lines for the one that actually has the
+wanted path.
+
+No CI workflow exists yet (no `.github/workflows/`, no `.yml`/`.yaml`
+anywhere in the repo) — `tests/smoke.sh` and `tests/drv-equivalence.sh`
+are locally-run only for now.
 
 ## How to verify a build actually got accelerated
 
