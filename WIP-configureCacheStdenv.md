@@ -45,7 +45,7 @@ shape already checked into the repo.
 
 ## Current status: working, with real early-cutoff
 
-Three examples build and cache correctly:
+Four examples build and cache correctly:
 
 - `.#hello-cache` — autotools, single-output, no `configureSrcFilter`
   (whole-tree snapshot).
@@ -56,11 +56,15 @@ Three examples build and cache correctly:
   an ordinary native exec.
 - `.#hello-cache-filtered` — autotools, WITH `configureSrcFilter` set
   (the `autotools` preset from `nix/configureSrcFilterPresets.nix`
-  plus `existenceStubs = [ "src/hello.c" ]`). This is the one that
-  proves the actual early-cutoff win — see below.
+  plus `existenceStubs = [ "src/hello.c" ]`). Proves the early-cutoff
+  win for autotools — see below.
+- `.#fmt-cache-filtered` — cmake, WITH `configureSrcFilter` set (the
+  `cmake` preset plus fmt-specific patterns — see Gotcha #7). Proves
+  the same win for cmake, on a package where it's actually possible —
+  see Gotcha #7 for why `zstd` itself can't take this path.
 
 Verified directly:
-- `nix run` on all three prints real output.
+- `nix run`/build on all four produces real output.
 - `zstd-cache`'s `bin/zstd` gets a **correct RPATH baked natively** by
   the linker — no patchelf/ELF-patching step needed at this boundary
   at all (unlike dynDrvStdenv's `elfRpathFixupScript`), since no
@@ -71,16 +75,18 @@ Verified directly:
   verification only — not committed), rebuilt, and confirmed via `nix
   show-derivation` that group A's `.drv` hash was byte-identical and
   it was NOT rebuilt — only group B's derivation rebuilt.
-- **Real early-cutoff on SOURCE edits, not just attr changes** (the
-  actual ask — see "How early-cutoff really works" below for the
-  mechanism and "Gotchas" for the four real bugs this surfaced):
-  edited a file the `autotools` filter EXCLUDES (`src/hello.c`) via a
-  controlled `overrideAttrs`-substituted `src` — confirmed group A's
-  own snapshot output (`ggtree`) resolved to the exact same store path
-  before and after, so group A never rebuilt at all. Negative control:
-  the same edit to a file the filter INCLUDES (`configure.ac`)
-  correctly produced a DIFFERENT `ggtree` path, confirming the filter
-  isn't just excluding everything.
+- **Real early-cutoff on SOURCE edits, not just attr changes**, for
+  BOTH filtered examples (autotools and cmake) — see "How early-cutoff
+  really works" below for the mechanism and Gotchas #5/#7 for what it
+  took to get each build system's preset right:
+  - `hello-cache-filtered`: edited `src/hello.c` (excluded by the
+    `autotools` preset) via a controlled `overrideAttrs`-substituted
+    `src` — group A's `ggtree` output resolved to the exact same store
+    path before and after. Negative control: editing `configure.ac`
+    (included) produced a different `ggtree` path.
+  - `fmt-cache-filtered`: same test, `LICENSE` (excluded) vs
+    `CMakeLists.txt` (included) — same result, ggtree path unchanged
+    for the excluded edit, changed for the included one.
 
 Build any of them:
 
@@ -140,13 +146,13 @@ below for how deep this rabbit hole went for `hello` alone.
   AC_CONFIG_SRCDIR-style presence-only checks).
 - `nix/configureSrcFilterPresets.nix` — starting-point pattern lists
   (`autotools`, `cmake`). Explicitly caveated NOT guaranteed correct —
-  see Gotcha #5.
+  see Gotchas #5 and #7.
 - `flake.nix` — `configureCacheStdenv` package def (~line 318),
   `configureCacheExamples` (~line 323, includes
-  `hello-cache-filtered`), and both `configureCacheStdenv` and
-  `configureSrcFilterPresets` exposed as top-level flake outputs
-  (same convention as `dynDrvStdenv`) so downstream flakes can use
-  them without vendoring.
+  `hello-cache-filtered` and `fmt-cache-filtered`), and both
+  `configureCacheStdenv` and `configureSrcFilterPresets` exposed as
+  top-level flake outputs (same convention as `dynDrvStdenv`) so
+  downstream flakes can use them without vendoring.
 
 ## Simplification: group B always unpacks for itself
 
@@ -289,6 +295,31 @@ hash was identical with/without a group-B-only `installFlags`).
    asymmetry entirely: group B now always runs its own unpack+patch,
    so there's no "unfiltered case" left to special-case.
 
+7. **cmake's own configure-time `file(GLOB ...)` calls can make
+   filtering structurally impossible for a given package.** Tried
+   `zstd` first for the `cmake` preset — its `CMakeLists.txt`
+   `file(GLOB CommonSources lib/common/*.c)`-style calls (source lists
+   for the library, tests, and every contrib tool) mean configure
+   itself needs the ENTIRE `lib/`, `programs/`, `tests/`, `contrib/`
+   tree present just to enumerate what it'll build later — there's no
+   smaller filter that helps, because "the files configure reads" is
+   effectively "everything." `fmt` uses explicit source lists instead
+   (`set(FMT_SOURCES src/format.cc)`), so filtering it down actually
+   means something. Getting `fmt` working also needed patterns beyond
+   the generic `cmake` preset: `src/*.cc` and `include/fmt/*.h`
+   (the real library sources/headers `add_library()` needs at
+   configure time), `README.md`/`ChangeLog.md` (baked directly into
+   the same `add_library()` call), `support/cmake/*.in` (pkg-config
+   and cmake-config templates `configure_file()` reads), and `test/`
+   wholesale (BUILD_TESTING defaults on, and `test/CMakeLists.txt`
+   enumerates a dozen individual test targets, each needing its own
+   source present — same "not worth chasing individually" tradeoff as
+   autotools' `po/`). This is the general lesson: whether
+   `configureSrcFilter` can help AT ALL for a given cmake package
+   depends on whether that package's own `CMakeLists.txt` globs its
+   sources or lists them explicitly — the tool doesn't have visibility
+   into that on its own, and there's no way to tell without trying.
+
 ## What's NOT done / open threads
 
 - Scoped to exactly 2 groups (configure | build..dist) for v1, per the
@@ -301,23 +332,22 @@ hash was identical with/without a group-B-only `installFlags`).
 - `extraGroupBAttrs` is basically unnecessary for the same reason
   dynDrvStdenv's `extraPhase2Attrs` is — group B IS reachable via a
   plain `.overrideAttrs` on the returned package. Kept for symmetry.
-- `configureSrcFilter` only tested against `hello`'s autotools shape.
-  The `cmake` preset in `configureSrcFilterPresets.nix` is UNTESTED —
-  `zstd-cache`/`zstd-dyndrv` don't use `configureSrcFilter` at all.
-  Given how many distinct bug classes hello alone surfaced (Gotcha
-  #5), treat the cmake preset as unverified until someone actually
-  builds a `zstd`-with-`configureSrcFilter` example and confirms it.
-- Only tested against hello/zstd (same two build-system shapes
-  dynDrvStdenv used for its first pass). Untested: packages whose
+- The `cmake` preset in `configureSrcFilterPresets.nix` is now
+  verified — against `fmt`, not `zstd` (see Gotcha #7 for why zstd
+  can't use it at all). Any OTHER cmake package's own configure-time
+  file reads are still unknown until tried; the preset is a starting
+  point, not a guarantee, same as always.
+- Only tested against hello/zstd/fmt (same three build-system shapes
+  dynDrvStdenv used for its first pass, plus fmt). Untested: packages whose
   configure step itself execs a just-built tool (the "exec one of its
   own binaries mid-build" case dynDrvStdenv's zstd-dyndrv example had
   to work around) — a configure-time equivalent might exist in some
   package but hasn't been hit yet.
 - Test coverage exists: `tests/smoke.sh`'s `CONFIGCACHE` set
-  (hello-cache/zstd-cache/hello-cache-filtered), same `nix run`-only
-  verification pattern as `DYNDRV`. This only checks "does it still
-  build and run" — the actual early-cutoff/caching behavior has no
-  automated test, only the manual `nix show-derivation`/build-path
-  comparisons documented above. Worth automating (e.g. a script that
-  builds twice with a controlled src edit and asserts on drv/output
-  hashes) if this gets more use.
+  (hello-cache/zstd-cache/hello-cache-filtered/fmt-cache-filtered),
+  same `nix run`-only verification pattern as `DYNDRV`. This only
+  checks "does it still build and run" — the actual early-cutoff/
+  caching behavior has no automated test, only the manual `nix
+  show-derivation`/build-path comparisons documented above. Worth
+  automating (e.g. a script that builds twice with a controlled src
+  edit and asserts on drv/output hashes) if this gets more use.

@@ -334,6 +334,36 @@
                 };
               };
             };
+            # Same idea, cmake this time. zstd's own CMakeLists.txt
+            # uses file(GLOB ...) to collect its library/test/contrib
+            # sources, so filtering it can't preserve early-cutoff —
+            # configure needs the whole globbed directory regardless.
+            # fmt lists its sources explicitly, so filtering actually
+            # means something here. The extra patterns beyond the
+            # cmake preset are all real configure-time reads: fmt's
+            # own CMakeLists.txt (main library sources/headers,
+            # README.md/ChangeLog.md baked into add_library, the
+            # fmt.pc.in/fmt-config.cmake.in templates) plus test/
+            # wholesale, since BUILD_TESTING is on by default and
+            # test/CMakeLists.txt enumerates a dozen targets that'd
+            # otherwise need chasing one at a time.
+            fmt-cache-filtered = pkgs.fmt.override {
+              stdenv = configureCacheStdenv {
+                stdenv = pkgs.stdenv;
+                configureSrcFilter = {
+                  includePatterns = configureSrcFilterPresets.cmake ++ [
+                    "include/fmt/*.h"
+                    "src/*.cc"
+                    "README.md"
+                    "ChangeLog.md"
+                    "support/cmake/*.in"
+                    "test"
+                    "test/*"
+                    "test/*/*"
+                  ];
+                };
+              };
+            };
           };
 
           # Concrete mkNixggBuild call sites, exposed as flake
@@ -455,7 +485,7 @@
         // exampleResults   # .#hello .#lua .#fmt .#mosh .#redis .#ffmpeg .#gcc .#two-phase .#llvm
         // exampleShells    # .#<name>-shell for each of the above
         // dynDrvExamples   # .#hello-dyndrv .#mosh-dyndrv .#zstd-dyndrv
-        // configureCacheExamples   # .#hello-cache .#zstd-cache .#hello-cache-filtered
+        // configureCacheExamples   # .#hello-cache .#zstd-cache .#hello-cache-filtered .#fmt-cache-filtered
         // {
           # Extras an individual example exposes beyond .result/.shell.
           # llvm's two tblgen phases are separately buildable so the

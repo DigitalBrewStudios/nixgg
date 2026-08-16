@@ -54,7 +54,21 @@
   ];
 
   # CMake: CMakeLists.txt at any nesting level cmake's own
-  # add_subdirectory() graph might use, plus *.cmake modules.
+  # add_subdirectory() graph might use, *.cmake modules, and *.in
+  # templates configure_file() reads directly (pkg-config .pc.in
+  # files, generated cmake config files, etc — same class of gap
+  # autotools' *.in patterns cover, just cmake's own convention).
+  #
+  # This only gets you as far as CMakeLists.txt/*.cmake/*.in — most
+  # real cmake packages ALSO need explicit source-file patterns added
+  # at the call site, because add_library()/add_executable() need
+  # their real .c/.cc sources present at CONFIGURE time already (cmake
+  # generates the build system from the full target graph, unlike
+  # autotools where configure and make are more separate). If a
+  # package's CMakeLists.txt uses `file(GLOB ...)` to collect sources
+  # from a whole directory (zstd does this for lib/**/*.c), there is
+  # no smaller filter that preserves early-cutoff — configure needs
+  # the entire globbed directory present either way.
   cmake = [
     "CMakeLists.txt"
     "*/CMakeLists.txt"
@@ -64,5 +78,9 @@
     "*/*.cmake"
     "cmake"
     "cmake/*"
+    "*.in"
+    "*/*.in"
+    "*/*/*.in"
+    "*/*/*/*.in"
   ];
 }

@@ -106,16 +106,18 @@ DYNDRV=(
 # `nix run`-only verification rationale as DYNDRV: zstd-cache's
 # multi-output bin/zstd needs its own sibling "out" output's
 # libzstd.so.1, which exists only inside $ALT_STORE. hello-cache-filtered
-# additionally exercises configureSrcFilter's real early-cutoff win
-# (shrinking group A's own `src` input so an edit outside the filtered
-# set never re-runs configure) — this smoke test only covers "does it
-# still build and run correctly", not the caching behavior itself
-# (verified manually via `nix show-derivation`/`nix path-info`
-# comparisons — see WIP-configureCacheStdenv.md).
+# and fmt-cache-filtered additionally exercise configureSrcFilter's
+# real early-cutoff win (shrinking group A's own `src` input so an
+# edit outside the filtered set never re-runs configure) — this smoke
+# test only covers "does it still build and run correctly", not the
+# caching behavior itself (verified manually via `nix
+# show-derivation`/`nix path-info` comparisons — see
+# WIP-configureCacheStdenv.md).
 CONFIGCACHE=(
   "hello-cache|bin/hello|%s"
   "zstd-cache|bin/zstd|%s --version"
   "hello-cache-filtered|bin/hello|%s"
+  "fmt-cache-filtered|lib/libfmt.so.12.1.0|-"
 )
 
 case "${EXAMPLES:-quick}" in
