@@ -156,7 +156,7 @@ stdenv0.override (
                 # the real outputs + ggtree here instead, right after
                 # configure. A normal hook is fine — configurePhase is
                 # never itself skipped, so postConfigure always runs.
-                postConfigure = (probeArgs.postConfigure or "") + snapshotScript;
+                postConfigure = (orig.postConfigure or "") + snapshotScript;
               };
           in
           extraGroupAAttrs finalAttrs base;

@@ -194,13 +194,30 @@ stdenv0.override (
         # Nix's `${}` antiquotation, so the emitted script contains a
         # literal shell variable reference (e.g. "$bin"), not a
         # Nix-side interpolation of it.
+        #
+        # `[ -d ... ] &&` guards each cp: multiple-outputs.sh's
+        # automatic per-output DESTDIR routing (_overrideFirst
+        # outputBin "bin" "out", etc.) only takes effect when the
+        # package's OWN build system actually threads $bin/$dev/...
+        # through to its install step (e.g. via --bindir=$bin/bin on
+        # an autoconf-style configure). Some packages don't — openssl
+        # installs everything flat under out's placeholder and does
+        # its own real `mv $out/bin $bin/bin` in postInstall instead
+        # — so `$DESTDIR<placeholder>` for that output is never
+        # created at all. Failing on a missing directory there would
+        # break every such package outright; skipping it just leaves
+        # that real output empty for THIS script and lets the
+        # package's own postInstall (which runs right after, per
+        # nixpkgs hook order) populate it from the real $out however
+        # it normally does. Confirmed necessary directly: openssl's
+        # own bin split hit exactly this.
         restoreOutputsScript = lib.concatMapStrings (
           o:
           let
             v = "$" + o;
             ph = outputPlaceholder o;
           in
-          "mkdir -p \"${v}\"\ncp -a \"$DESTDIR${ph}/.\" \"${v}/\"\n"
+          "mkdir -p \"${v}\"\nif [ -d \"$DESTDIR${ph}\" ]; then cp -a \"$DESTDIR${ph}/.\" \"${v}/\"; fi\n"
         ) realOutputs;
 
         # cc-wrapper's ld-wrapper bakes a self-rpath into every linked
@@ -241,8 +258,17 @@ stdenv0.override (
         withPhase1Attrs =
           finalAttrs:
           let
+            # Real finalAttrs fixed point, not probeArgs — some
+            # packages read finalAttrs inside a hook (e.g. openssl's
+            # own postPatch checks finalAttrs.finalPackage.doCheck),
+            # which throws "attribute 'finalPackage' missing" against
+            # probeArgs's throwaway {} application. probeArgs stays
+            # for the STATIC pname/version/outputs reads above, which
+            # only need a stable throwaway value, not the real fixed
+            # point.
+            orig = lib.toFunction argsOrFn finalAttrs;
             base =
-              (lib.toFunction argsOrFn finalAttrs)
+              orig
               // {
                 name = "${outerName}.drv"; # submit-output requires this
                                             # to match outputPathName(outerName, "out")
@@ -268,6 +294,15 @@ stdenv0.override (
                 # `outputs`.
                 outputs = [ "out" ];
                 out = "/nonexistent";
+                # Same reason as `outputs` above: make-derivation.nix
+                # computes `outputs' = outputs ++ optional
+                # separateDebugInfo' "debug"` at its OWN layer,
+                # downstream of this override, so setting `outputs =
+                # ["out"]` alone doesn't stop a package's own
+                # `separateDebugInfo = true` (e.g. openssl) from
+                # silently reintroducing a second output and tripping
+                # the same "*.drv" single-output requirement.
+                separateDebugInfo = false;
               }
               # Extra outputs (bin/dev/man/...) are plain env vars
               # here, NOT declared Nix derivation outputs — phase 1
@@ -296,11 +331,11 @@ stdenv0.override (
                 # honors env-nested attrs, not bare top-level ones like
                 # `out` above.
                 __structuredAttrs = false;
-                requiredSystemFeatures = (probeArgs.requiredSystemFeatures or [ ]) ++ [ "builder-rpc-v0" ];
+                requiredSystemFeatures = (orig.requiredSystemFeatures or [ ]) ++ [ "builder-rpc-v0" ];
                 __contentAddressed = true;
                 outputHashMode = "text";
                 outputHashAlgo = "sha256";
-                nativeBuildInputs = (probeArgs.nativeBuildInputs or [ ]) ++ [ patchedNix ];
+                nativeBuildInputs = (orig.nativeBuildInputs or [ ]) ++ [ patchedNix ];
 
                 # NIXGG_BYPASS gates acceleration per shim invocation
                 # (bypassed() short-circuits to a real passthrough
@@ -314,15 +349,15 @@ stdenv0.override (
                 # stubs, no error at all). BYPASS itself must stay set
                 # through configure (autoreconfHook, cmake probes) —
                 # only buildPhase needs real acceleration.
-                postPatch = (probeArgs.postPatch or "") + ''
+                postPatch = (orig.postPatch or "") + ''
                   export NIXGG_BYPASS=1
                   ${ggShimsOnPath knownStorePathsJSON}
                 '';
                 preBuild = ''
                   unset NIXGG_BYPASS
-                '' + (probeArgs.preBuild or "");
+                '' + (orig.preBuild or "");
 
-                postBuild = (probeArgs.postBuild or "") + submitBuildTreeScript outerName;
+                postBuild = (orig.postBuild or "") + submitBuildTreeScript outerName;
               };
           in
           # extraPhase1Attrs runs last, over dynDrvStdenv's own base
@@ -360,8 +395,11 @@ stdenv0.override (
       mkDerivationSuper (
         finalAttrs:
         let
+          # Real finalAttrs fixed point, not probeArgs — see
+          # withPhase1Attrs's own orig binding above for why.
+          orig = lib.toFunction argsOrFn finalAttrs;
           base =
-            (lib.toFunction argsOrFn finalAttrs)
+            orig
             // {
               phases = "ggRestorePhase checkPhase installPhase fixupPhase installCheckPhase distPhase";
               dontUnpack = true;
@@ -374,8 +412,8 @@ stdenv0.override (
                 export DESTDIR="$NIX_BUILD_TOP/.gg-destdir"
                 runHook postGgRestore
               '';
-              installFlags = (probeArgs.installFlags or "");
-              postInstall = restoreOutputsScript + (probeArgs.postInstall or "");
+              installFlags = (orig.installFlags or "");
+              postInstall = restoreOutputsScript + (orig.postInstall or "");
               # Must run before fixupPhase's own patchelf-based
               # rpath-shrinking, which (correctly) drops any rpath
               # entry pointing at a path that doesn't exist — exactly
@@ -383,7 +421,7 @@ stdenv0.override (
               # ran any later. postInstall (above) has already split
               # outputs apart by the time preFixup hooks run, so the
               # real output paths this substitutes in are populated.
-              preFixup = elfRpathFixupScript + (probeArgs.preFixup or "");
+              preFixup = elfRpathFixupScript + (orig.preFixup or "");
             };
         in
         extraPhase2Attrs finalAttrs base

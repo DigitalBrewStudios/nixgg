@@ -195,11 +195,11 @@ stdenv0.override (
                 # exec (bypassed() in go/internal/shim/passthrough.go),
                 # so nothing here needs builder-rpc-v0 or
                 # requiredSystemFeatures at all.
-                postPatch = (probeArgs.postPatch or "") + ''
+                postPatch = (orig.postPatch or "") + ''
                   export NIXGG_BYPASS=1
                   ${ggShimsOnPath knownStorePathsJSON}
                 '';
-                postConfigure = (probeArgs.postConfigure or "") + snapshotScript;
+                postConfigure = (orig.postConfigure or "") + snapshotScript;
               };
           in
           extraGroupAAttrs finalAttrs base;
@@ -233,8 +233,12 @@ stdenv0.override (
         withGroupBAttrs =
           finalAttrs:
           let
+            # Real finalAttrs fixed point, not probeArgs — see group
+            # A's own orig binding above for why (some packages read
+            # finalAttrs inside a hook).
+            orig = lib.toFunction argsOrFn finalAttrs;
             base =
-              (lib.toFunction argsOrFn finalAttrs)
+              orig
               // {
                 name = "${outerName}.drv"; # submit-output requires this
                                             # to match outputPathName(outerName, "out")
@@ -260,13 +264,21 @@ stdenv0.override (
                 doDist = false;
                 outputs = [ "out" ];
                 out = "/nonexistent";
+                # Same reason as dynDrvStdenv.nix's own phase 1:
+                # make-derivation.nix appends "debug" to outputs at
+                # its own layer when separateDebugInfo is set,
+                # downstream of this override, so it needs forcing
+                # off too or a package like openssl reintroduces a
+                # second output and trips the "*.drv" single-output
+                # requirement.
+                separateDebugInfo = false;
                 # Same convention as dynDrvStdenv's own phase 1: shims go
                 # on PATH from postPatch (runs before ggRestorePhase),
                 # not inline in ggRestorePhase itself — keeps the restore
                 # phase focused on the tree-copy/path-rewrite it's there
                 # for. NIXGG_BYPASS stays set through the restore/rewrite
                 # (nothing execs a shim there); preBuild unsets it below.
-                postPatch = (probeArgs.postPatch or "") + ''
+                postPatch = (orig.postPatch or "") + ''
                   export NIXGG_BYPASS=1
                   ${ggShimsOnPath knownStorePathsJSON}
                 '';
@@ -279,11 +291,11 @@ stdenv0.override (
               )
               // {
                 __structuredAttrs = false;
-                requiredSystemFeatures = (probeArgs.requiredSystemFeatures or [ ]) ++ [ "builder-rpc-v0" ];
+                requiredSystemFeatures = (orig.requiredSystemFeatures or [ ]) ++ [ "builder-rpc-v0" ];
                 __contentAddressed = true;
                 outputHashMode = "text";
                 outputHashAlgo = "sha256";
-                nativeBuildInputs = (probeArgs.nativeBuildInputs or [ ]) ++ [ patchedNix ];
+                nativeBuildInputs = (orig.nativeBuildInputs or [ ]) ++ [ patchedNix ];
 
                 # Custom phase name, not a postPatch/preConfigure
                 # hook: dontConfigure means runPhase skips
@@ -314,9 +326,9 @@ stdenv0.override (
                 # turns on.
                 preBuild = ''
                   unset NIXGG_BYPASS
-                '' + (probeArgs.preBuild or "");
+                '' + (orig.preBuild or "");
 
-                postBuild = (probeArgs.postBuild or "") + submitBuildTreeScript outerName;
+                postBuild = (orig.postBuild or "") + submitBuildTreeScript outerName;
               };
           in
           extraGroupBAttrs finalAttrs base;
@@ -325,13 +337,18 @@ stdenv0.override (
 
         builtTree = builtins.outputOf groupB.outPath "out";
 
+        # See dynDrvStdenv.nix's own restoreOutputsScript for why the
+        # `[ -d ... ]` guard is needed (openssl-style packages that
+        # split outputs themselves in postInstall against the real
+        # $out, never populating $DESTDIR<placeholder> for that
+        # output at all).
         restoreOutputsScript = lib.concatMapStrings (
           o:
           let
             v = "$" + o;
             ph = outputPlaceholder o;
           in
-          "mkdir -p \"${v}\"\ncp -a \"$DESTDIR${ph}/.\" \"${v}/\"\n"
+          "mkdir -p \"${v}\"\nif [ -d \"$DESTDIR${ph}\" ]; then cp -a \"$DESTDIR${ph}/.\" \"${v}/\"; fi\n"
         ) realOutputs;
 
         elfRpathFixupScript =
@@ -357,8 +374,11 @@ stdenv0.override (
       mkDerivationSuper (
         finalAttrs:
         let
+          # Real finalAttrs fixed point, not probeArgs — see group A's
+          # own orig binding above for why.
+          orig = lib.toFunction argsOrFn finalAttrs;
           base =
-            (lib.toFunction argsOrFn finalAttrs)
+            orig
             // {
               phases = "ggRestorePhase checkPhase installPhase fixupPhase installCheckPhase distPhase";
               dontUnpack = true;
@@ -371,8 +391,8 @@ stdenv0.override (
                 export DESTDIR="$NIX_BUILD_TOP/.gg-destdir"
                 runHook postGgRestore
               '';
-              installFlags = (probeArgs.installFlags or "");
-              postInstall = restoreOutputsScript + (probeArgs.postInstall or "");
+              installFlags = (orig.installFlags or "");
+              postInstall = restoreOutputsScript + (orig.postInstall or "");
               # Must run before fixupPhase's own patchelf-based
               # rpath-shrinking, which (correctly) drops any rpath
               # entry pointing at a path that doesn't exist — exactly
@@ -380,7 +400,7 @@ stdenv0.override (
               # ran any later. postInstall (above) has already split
               # outputs apart by the time preFixup hooks run, so the
               # real output paths this substitutes in are populated.
-              preFixup = elfRpathFixupScript + (probeArgs.preFixup or "");
+              preFixup = elfRpathFixupScript + (orig.preFixup or "");
             };
         in
         extraGroupCAttrs finalAttrs base
