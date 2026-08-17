@@ -299,6 +299,16 @@ func TestTargetSymlinkToDrvRefStub(t *testing.T) {
 		if got.Ref != drv {
 			t.Errorf("Ref = %q, want %q", got.Ref, drv)
 		}
+		// Sub must be the REAL target's basename (libfoo.so.1.2.3),
+		// not the alias's own name (libfoo.so) — the drv's output
+		// will exist under the former, never the latter. Missing
+		// this broke openssl's engines/*.so, which link against the
+		// plain `ln -s libcrypto.so.3 libcrypto.so` alias openssl's
+		// own Makefile creates: the emitted link line reached for
+		// ".../bin/libcrypto.so", a file that never exists.
+		if got.Sub != "libfoo.so.1.2.3" {
+			t.Errorf("Sub = %q, want %q (the real target's basename, not the alias)", got.Sub, "libfoo.so.1.2.3")
+		}
 	})
 
 	t.Run("multi hop", func(t *testing.T) {
@@ -321,6 +331,9 @@ func TestTargetSymlinkToDrvRefStub(t *testing.T) {
 		got := Target(alias, "", paths.Layout{})
 		if got.Kind != Drv || got.Ref != drv {
 			t.Errorf("multi-hop chain: Kind=%v Ref=%q, want Drv %q", got.Kind, got.Ref, drv)
+		}
+		if got.Sub != "libfoo.so.1.2.3" {
+			t.Errorf("multi-hop chain: Sub = %q, want %q", got.Sub, "libfoo.so.1.2.3")
 		}
 	})
 

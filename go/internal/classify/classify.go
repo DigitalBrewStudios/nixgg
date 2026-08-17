@@ -192,7 +192,17 @@ func Target(path, altStorePrefix string, l paths.Layout) Result {
 	// unaccelerated Passthrough. The direct-regular-file branch above has
 	// always checked this; the symlink path did not.
 	if ref := drvref.Path(dest); ref != "" {
-		return Result{Kind: Drv, Ref: ref}
+		// Sub carries the referenced drv's REAL output basename
+		// (dest's own basename — e.g. "libcrypto.so.3"), not the
+		// caller's alias name ("libcrypto.so"). Without this, the
+		// emitted link line reaches for "<drv-out>/bin/libcrypto.so"
+		// — a file that never exists, since the drv's own output is
+		// named libcrypto.so.3 — and ld fails with "cannot find ...:
+		// No such file or directory". Confirmed directly against
+		// openssl's engines/*.so, which link against the plain
+		// `ln -s libcrypto.so.3 libcrypto.so` alias its own Makefile
+		// creates.
+		return Result{Kind: Drv, Ref: ref, Sub: filepath.Base(dest)}
 	}
 	return Result{Kind: Regular}
 }

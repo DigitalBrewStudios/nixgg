@@ -84,8 +84,21 @@ func classifyInputs(
 		case classify.Drv:
 			// Sandbox-mode input: previous shim produced a .drv here.
 			// Only meaningful when we're also in sandbox mode.
+			//
+			// Name is normally the caller's own argv basename — correct
+			// when the caller referenced the drv's real output
+			// directly. But c.Sub is set when classify.Target followed
+			// a SONAME alias symlink (libcrypto.so -> libcrypto.so.3)
+			// to reach the drv; there, the caller's basename
+			// ("libcrypto.so") is NOT the name the drv's own output
+			// will exist under once resolved ("libcrypto.so.3"), so
+			// c.Sub — the alias's real target basename — must win.
+			name := filepath.Base(in)
+			if c.Sub != "" {
+				name = c.Sub
+			}
 			jsonInputs = append(jsonInputs, expr.JSONDrvInput{
-				Kind: "drv", Ref: c.Ref, Name: filepath.Base(in),
+				Kind: "drv", Ref: c.Ref, Name: name,
 			})
 		default:
 			logf("%s passthrough: can't model input %s (%s)", logPrefix, in, c.Reason())
