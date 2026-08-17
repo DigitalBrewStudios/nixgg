@@ -65,7 +65,7 @@ pulled out into its own plain, unsandboxed group and given
   verbatim. Doesn't care whether the tree it restores came from a
   1-group or 2-group build side.
 
-## Current status: working, hello + zstd verified
+## Current status: working, hello + mosh + zstd verified
 
 `.#hello-dyndrv-configure-cached` — autotools, single-output, WITH
 `configureSrcFilter` set (autotools preset + `existenceStubs =
@@ -82,28 +82,44 @@ pulled out into its own plain, unsandboxed group and given
    (baseline / edit to `src/hello.c` [excluded] / edit to
    `configure.ac` [included]) and compared group A's own `ggtree`
    output path. baseline and excluded matched exactly; included
-   differed — same pattern `tests/configure-cache-cutoff.sh` already
-   automates for `configureCacheStdenv` alone.
-4. `tests/smoke.sh`'s quick set (14 examples, including
-   `hello-dyndrv-configure-cached` and `zstd-dyndrv-configure-cached`)
-   — all pass, no regressions.
+   differed. Automated in
+   [tests/dyndrv-configure-cache-cutoff.sh](tests/dyndrv-configure-cache-cutoff.sh),
+   mirroring `tests/configure-cache-cutoff.sh`'s own technique.
+4. `tests/smoke.sh`'s quick set (15 examples, including
+   `hello-dyndrv-configure-cached`, `mosh-dyndrv-configure-cached`,
+   and `zstd-dyndrv-configure-cached`) — all pass, no regressions.
+
+`.#mosh-dyndrv-configure-cached` — autotools + `autoreconfHook`, no
+`configureSrcFilter` (mosh isn't in the verified preset set). Verified
+directly:
+
+5. **`autoreconfHook`'s phase injection is unaffected**: group A never
+   hardcodes `phases` (uses `dontBuild`/`dontInstall`/... toggles, same
+   as `configureCacheStdenv`'s own group A), so
+   `appendToVar preConfigurePhases autoreconfPhase` still applies
+   normally — no special-casing needed.
+6. **Per-TU acceleration count matches exactly**: group B's resolved
+   derivation references 30 `tu-*` compile sources, 6 `ar-*` archives,
+   2 `bin-*` links — 38 total, the same count `mosh-dyndrv` already
+   documents.
+7. `mosh-server --version` runs correctly through `nix shell`.
 
 `.#zstd-dyndrv-configure-cached` — cmake, 4 outputs, no
 `configureSrcFilter` (zstd's own `CMakeLists.txt` uses `file(GLOB
 ...)`, so filtering can't preserve early-cutoff for it — same
 reasoning as `zstd-cache`). Verified directly:
 
-5. **Multi-output splitting works**: `out`/`bin`/`dev`/`man` all
+8. **Multi-output splitting works**: `out`/`bin`/`dev`/`man` all
    populated correctly by group C's `restoreOutputsScript`, same as
    `zstd-dyndrv`.
-6. **A real `checkPhase` (`ctest`) passes**: `playTests` ran and
+9. **A real `checkPhase` (`ctest`) passes**: `playTests` ran and
    passed against group C's resolved binaries, not stubs.
-7. **The `gen_html` mid-build-exec fix applies to BOTH group A and
-   group B**, not group B alone — see Gotcha #4 below. With the fix
-   applied to both (as wired in `flake.nix`), `zstd`'s own
-   manual-page generation (which execs a freshly-built helper
-   mid-build) and the final `bin/zstd --version` both work correctly
-   through `nix run`/`nix shell`.
+10. **The `gen_html` mid-build-exec fix applies to BOTH group A and
+    group B**, not group B alone — see Gotcha #4 below. With the fix
+    applied to both (as wired in `flake.nix`), `zstd`'s own
+    manual-page generation (which execs a freshly-built helper
+    mid-build) and the final `bin/zstd --version` both work correctly
+    through `nix run`/`nix shell`.
 
 ## Gotchas
 
@@ -150,7 +166,6 @@ reasoning as `zstd-cache`). Verified directly:
 
 ## Deferred (explicitly out of scope for this pass)
 
-- `mosh` (autoreconfHook).
-- Automating the early-cutoff proof into a `tests/*.sh` script (done
-  manually this pass, mirroring `tests/configure-cache-cutoff.sh`'s
-  technique but not yet turned into its own script).
+- Multi-output + `configureSrcFilter` combined on the same package
+  (hello only tests single-output+filter, zstd only tests
+  multi-output+no-filter — the combination is untested).

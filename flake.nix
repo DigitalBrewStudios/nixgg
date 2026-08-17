@@ -393,6 +393,19 @@
                 };
               };
             };
+            # mosh through the combined mechanism: autotools +
+            # autoreconfHook, the setup-hook-injected-phase case that
+            # broke a naive hardcoded `phases` list in dynDrvStdenv's
+            # own early history (see its top comment). Group A here
+            # never hardcodes `phases` (uses dontBuild/dontInstall/...
+            # toggles instead, same as configureCacheStdenv's own
+            # group A), so autoreconfHook's `appendToVar
+            # preConfigurePhases autoreconfPhase` still applies
+            # normally. No configureSrcFilter — mosh isn't in the
+            # verified preset set.
+            mosh-dyndrv-configure-cached = pkgs.mosh.override {
+              stdenv = dynDrvConfigureCacheStdenv { stdenv = pkgs.stdenv; };
+            };
             # zstd through the combined mechanism: multi-output
             # (out/bin/dev/man), a real ctest-based checkPhase, and
             # the same gen_html mid-build-exec problem zstd-dyndrv
@@ -565,7 +578,7 @@
         // exampleShells    # .#<name>-shell for each of the above
         // dynDrvExamples   # .#hello-dyndrv .#mosh-dyndrv .#zstd-dyndrv
         // configureCacheExamples   # .#hello-cache .#zstd-cache .#hello-cache-filtered .#fmt-cache-filtered
-        // dynDrvConfigureCacheExamples   # .#hello-dyndrv-configure-cached .#zstd-dyndrv-configure-cached
+        // dynDrvConfigureCacheExamples   # .#hello-dyndrv-configure-cached .#mosh-dyndrv-configure-cached .#zstd-dyndrv-configure-cached
         // {
           # Extras an individual example exposes beyond .result/.shell.
           # llvm's two tblgen phases are separately buildable so the
