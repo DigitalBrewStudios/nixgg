@@ -408,6 +408,51 @@ build succeeds): it edits a file the filter excludes and one it
 includes, and asserts configure's own output only changes for the
 latter.
 
+## Combining both: skip configure AND get per-TU acceleration
+
+`dynDrvStdenv` and `configureCacheStdenv` split a package at different
+boundaries, but the same package can use both. `dynDrvStdenv`'s
+configure step runs with nixgg's shims live but bypassed — every shim
+call is a plain passthrough exec, not a sandboxed one — so configure
+doesn't actually need the sandbox it happens to run inside. Pull it
+into its own `configureCacheStdenv`-shaped group, and the sandboxed
+group only has to do the build:
+
+```nix
+{ pkgs, nixgg }:
+
+let
+  dynDrvConfigureCacheStdenv = nixgg.packages.${pkgs.system}.dynDrvConfigureCacheStdenv;
+  configureSrcFilterPresets = nixgg.packages.${pkgs.system}.configureSrcFilterPresets;
+in
+pkgs.hello.override {
+  stdenv = dynDrvConfigureCacheStdenv {
+    stdenv = pkgs.stdenv;
+    configureSrcFilter = {
+      includePatterns = configureSrcFilterPresets.autotools;
+      existenceStubs = [ "src/hello.c" ];
+    };
+  };
+}
+```
+
+Three derivations instead of two: configure (plain, unsandboxed,
+early-cutoff via `configureSrcFilter` — same as `configureCacheStdenv`
+above), build (sandboxed, real per-TU shim acceleration — same as
+`dynDrvStdenv`), install-onward (unmodified, copied from
+`dynDrvStdenv`'s own install group). An edit to a file configure
+never reads skips configure entirely; an edit to a source file only
+recompiles that file's own dynamic derivation. Tested against `hello`
+(autotools, with `configureSrcFilter`) and `zstd` (cmake, 4 outputs,
+real `ctest` checkPhase, and the `gen_html` mid-build-exec fix from
+above — here it has to patch both the configure group and the build
+group, since cmake's Makefile generation happens in the former and
+the latter never reconfigures). See
+[.#hello-dyndrv-configure-cached](flake.nix),
+[.#zstd-dyndrv-configure-cached](flake.nix), and
+[WIP-dynDrvConfigureCacheStdenv.md](WIP-dynDrvConfigureCacheStdenv.md)
+for details.
+
 ## Architecture
 
 Every shim writes a derivation. Nix does the rest. See

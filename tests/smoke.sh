@@ -120,15 +120,25 @@ CONFIGCACHE=(
   "fmt-cache-filtered|lib/libfmt.so.12.1.0|-"
 )
 
+# dynDrvConfigureCacheStdenv examples (nix/dynDrvConfigureCacheStdenv.nix)
+# — combines DYNDRV's per-TU sandboxed acceleration with CONFIGCACHE's
+# configure-step early-cutoff, splitting into three groups instead of
+# two. Same `nix run`-only rationale as DYNDRV: group C's restored
+# tree needs sibling outputs from inside $ALT_STORE.
+DYNCONFIGCACHE=(
+  "hello-dyndrv-configure-cached|bin/hello|%s"
+  "zstd-dyndrv-configure-cached|bin/zstd|%s --version"
+)
+
 case "${EXAMPLES:-quick}" in
-  quick) SET=("${QUICK[@]}"); DYNSET=("${DYNDRV[@]}" "${CONFIGCACHE[@]}") ;;
-  all)   SET=("${QUICK[@]}" "${SLOW[@]}"); DYNSET=("${DYNDRV[@]}" "${CONFIGCACHE[@]}") ;;
+  quick) SET=("${QUICK[@]}"); DYNSET=("${DYNDRV[@]}" "${CONFIGCACHE[@]}" "${DYNCONFIGCACHE[@]}") ;;
+  all)   SET=("${QUICK[@]}" "${SLOW[@]}"); DYNSET=("${DYNDRV[@]}" "${CONFIGCACHE[@]}" "${DYNCONFIGCACHE[@]}") ;;
   *)     SET=(); DYNSET=()
          for want in ${EXAMPLES}; do
            for e in "${QUICK[@]}" "${SLOW[@]}"; do
              [[ "${e%%|*}" == "$want" ]] && SET+=("$e")
            done
-           for e in "${DYNDRV[@]}" "${CONFIGCACHE[@]}"; do
+           for e in "${DYNDRV[@]}" "${CONFIGCACHE[@]}" "${DYNCONFIGCACHE[@]}"; do
              [[ "${e%%|*}" == "$want" ]] && DYNSET+=("$e")
            done
          done

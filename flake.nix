@@ -366,6 +366,85 @@
             };
           };
 
+          # dynDrvConfigureCacheStdenv combines both tricks above:
+          # group A is configureCacheStdenv's own configure-only
+          # group (optionally configureSrcFilter'd), group B is
+          # dynDrvStdenv's build-only sandboxed group restored on top
+          # of it, group C is dynDrvStdenv's install-onward group
+          # unchanged. See nix/dynDrvConfigureCacheStdenv.nix's top
+          # comment for why pulling configure out of the sandbox is
+          # sound (bypassed() passthrough) and README.md for usage.
+          dynDrvConfigureCacheStdenv = import ./nix/dynDrvConfigureCacheStdenv.nix {
+            inherit (pkgs) lib config stdenvNoCC;
+            inherit (pkgs) bash coreutils gnumake;
+            gcc         = toolchain.gcc;
+            nixgg       = nixggBin;
+            patchedNix  = patchedNix;
+            nixpkgsPath = nixpkgs;
+            inherit system;
+          };
+          dynDrvConfigureCacheExamples = {
+            hello-dyndrv-configure-cached = pkgs.hello.override {
+              stdenv = dynDrvConfigureCacheStdenv {
+                stdenv = pkgs.stdenv;
+                configureSrcFilter = {
+                  includePatterns = configureSrcFilterPresets.autotools;
+                  existenceStubs = [ "src/hello.c" ];
+                };
+              };
+            };
+            # zstd through the combined mechanism: multi-output
+            # (out/bin/dev/man), a real ctest-based checkPhase, and
+            # the same gen_html mid-build-exec problem zstd-dyndrv
+            # documents above — but here the fix has to reach BOTH
+            # group A (where cmake's own Makefile generation happens)
+            # and group B (which restores group A's tree and needs
+            # its own copy of the patched CMakeLists.txt if it ever
+            # reconfigures anything downstream). Patching group B
+            # alone reproduces the exact same "./gen_html: Permission
+            # denied" failure as no patch at all — confirmed directly.
+            # No configureSrcFilter here: zstd's own CMakeLists.txt
+            # uses file(GLOB ...), so filtering can't preserve
+            # early-cutoff for it (same reasoning as zstd-cache above).
+            zstd-dyndrv-configure-cached =
+              let
+                genHtml = mkNixggBuild {
+                  pname = "zstd-gen-html";
+                  version = "0";
+                  src = pkgs.zstd.src;
+                  target = "gen_html";
+                  buildCommand = ''
+                    cd contrib/gen_html
+                    g++ -O2 -c gen_html.cpp -o gen_html.o
+                    g++ gen_html.o -o gen_html
+                  '';
+                };
+                genHtmlPatch = ''
+                  substituteInPlace build/cmake/contrib/gen_html/CMakeLists.txt \
+                    --replace-fail \
+                      'add_executable(gen_html ''${GENHTML_DIR}/gen_html.cpp)' \
+                      "" \
+                    --replace-fail \
+                      'DEPENDS gen_html COMMENT "Update zstd manual")' \
+                      'COMMENT "Update zstd manual")' \
+                    --replace-fail \
+                      'set(GENHTML_BINARY ''${PROJECT_BINARY_DIR}/gen_html''${CMAKE_EXECUTABLE_SUFFIX})' \
+                      'set(GENHTML_BINARY ${genHtml.package}/bin/gen_html)'
+                '';
+              in
+              pkgs.zstd.override {
+                stdenv = dynDrvConfigureCacheStdenv {
+                  stdenv = pkgs.stdenv;
+                  extraGroupAAttrs = finalAttrs: old: old // {
+                    postPatch = old.postPatch + genHtmlPatch;
+                  };
+                  extraGroupBAttrs = finalAttrs: old: old // {
+                    postPatch = old.postPatch + genHtmlPatch;
+                  };
+                };
+              };
+          };
+
           # Concrete mkNixggBuild call sites, exposed as flake
           # packages so `nix build .#hello` / `.#lua` Just Work. Each
           # is the resolved final artifact — `builtins.outputOf`
@@ -486,6 +565,7 @@
         // exampleShells    # .#<name>-shell for each of the above
         // dynDrvExamples   # .#hello-dyndrv .#mosh-dyndrv .#zstd-dyndrv
         // configureCacheExamples   # .#hello-cache .#zstd-cache .#hello-cache-filtered .#fmt-cache-filtered
+        // dynDrvConfigureCacheExamples   # .#hello-dyndrv-configure-cached .#zstd-dyndrv-configure-cached
         // {
           # Extras an individual example exposes beyond .result/.shell.
           # llvm's two tblgen phases are separately buildable so the
@@ -514,6 +594,7 @@
           # Same reasoning as dynDrvStdenv above.
           inherit configureCacheStdenv;
           inherit configureSrcFilterPresets;
+          inherit dynDrvConfigureCacheStdenv;
           default = envShell;
         }
       );
