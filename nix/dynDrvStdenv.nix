@@ -211,13 +211,36 @@ stdenv0.override (
         # nixpkgs hook order) populate it from the real $out however
         # it normally does. Confirmed necessary directly: openssl's
         # own bin split hit exactly this.
+        #
+        # `mkdir -p "${v}"` lives INSIDE that same guard, not before
+        # it: a package whose own postInstall creates that output dir
+        # itself may do so with a bare `mkdir` (no `-p`), expecting a
+        # not-yet-existing directory — openssl's own `mkdir $dev`
+        # (right before `mv $out/include $dev/`) is exactly this.
+        # Pre-creating "$dev" unconditionally here made that `mkdir`
+        # fail with "File exists". Confirmed necessary directly.
+        #
+        # Two possible source locations, not one: a package's
+        # makeFlags/installFlags can point an output at its own real,
+        # absolute final path instead of the placeholder scheme here
+        # (openssl's `MANDIR=$(man)/share/man`, where $man is already
+        # the real "*-openssl-3.6.3-man" store path — set that way
+        # because phase 2, unlike phase 1, has real per-output paths
+        # available). Once DESTDIR is threaded onto make's own
+        # command line (see ggRestorePhase), THAT absolute path also
+        # ends up DESTDIR-prefixed — "$DESTDIR/nix/store/...-man",
+        # never under the placeholder tree at all. Confirmed directly
+        # against openssl's man output.
         restoreOutputsScript = lib.concatMapStrings (
           o:
           let
             v = "$" + o;
             ph = outputPlaceholder o;
           in
-          "mkdir -p \"${v}\"\nif [ -d \"$DESTDIR${ph}\" ]; then cp -a \"$DESTDIR${ph}/.\" \"${v}/\"; fi\n"
+          ''
+            if [ -d "$DESTDIR${ph}" ]; then mkdir -p "${v}"; cp -a "$DESTDIR${ph}/." "${v}/"; fi
+            if [ -d "$DESTDIR${v}" ]; then mkdir -p "${v}"; cp -a "$DESTDIR${v}/." "${v}/"; fi
+          ''
         ) realOutputs;
 
         # cc-wrapper's ld-wrapper bakes a self-rpath into every linked
@@ -410,6 +433,27 @@ stdenv0.override (
                 chmod -R u+w "$NIX_BUILD_TOP"
                 cd "$NIX_BUILD_TOP/$(cat "$NIX_BUILD_TOP/.gg-cwd")"
                 export DESTDIR="$NIX_BUILD_TOP/.gg-destdir"
+                # `export DESTDIR` alone is not enough: some packages'
+                # own Configure/Makefile (openssl's
+                # Configurations/unix-Makefile.tmpl is one) contain a
+                # plain `DESTDIR=` assignment of their own, which GNU
+                # Make's variable-precedence rules let silently
+                # override an inherited environment variable of the
+                # same name — only a value on make's OWN command line
+                # wins over that. Appended here, at ggRestorePhase
+                # RUNTIME (not baked into installFlags as a Nix
+                # string), so bash — not Nix, not make — expands
+                # $NIX_BUILD_TOP into a plain path with no literal `$`
+                # left in it: installFlags is passed straight through
+                # to make's argv, and a literal `$` there gets
+                # reinterpreted as make's OWN `$X`-style variable
+                # reference (confirmed directly, same reason this file
+                # never bakes $NIX_BUILD_TOP into installFlags via a
+                # Nix-side string either). Confirmed necessary
+                # directly: openssl's own `make install_sw` wrote
+                # straight to its literal `/nonexistent` prefix,
+                # never under $DESTDIR, until this was added.
+                installFlags="''${installFlags-} DESTDIR=$DESTDIR"
                 runHook postGgRestore
               '';
               installFlags = (orig.installFlags or "");

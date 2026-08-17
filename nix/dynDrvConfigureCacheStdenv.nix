@@ -341,14 +341,27 @@ stdenv0.override (
         # `[ -d ... ]` guard is needed (openssl-style packages that
         # split outputs themselves in postInstall against the real
         # $out, never populating $DESTDIR<placeholder> for that
-        # output at all).
+        # output at all), why `mkdir -p "${v}"` must live INSIDE that
+        # guard rather than run unconditionally first (a package's own
+        # postInstall may `mkdir` — no `-p` — an output dir itself,
+        # expecting it not to exist yet; openssl's own `mkdir $dev` is
+        # exactly this), and why there are TWO possible source
+        # locations per output, not one (a package's own
+        # makeFlags/installFlags can point straight at the real,
+        # absolute final path instead of the placeholder scheme —
+        # openssl's `MANDIR=$(man)/share/man` — which also ends up
+        # DESTDIR-prefixed once DESTDIR is threaded onto make's
+        # command line).
         restoreOutputsScript = lib.concatMapStrings (
           o:
           let
             v = "$" + o;
             ph = outputPlaceholder o;
           in
-          "mkdir -p \"${v}\"\nif [ -d \"$DESTDIR${ph}\" ]; then cp -a \"$DESTDIR${ph}/.\" \"${v}/\"; fi\n"
+          ''
+            if [ -d "$DESTDIR${ph}" ]; then mkdir -p "${v}"; cp -a "$DESTDIR${ph}/." "${v}/"; fi
+            if [ -d "$DESTDIR${v}" ]; then mkdir -p "${v}"; cp -a "$DESTDIR${v}/." "${v}/"; fi
+          ''
         ) realOutputs;
 
         elfRpathFixupScript =
@@ -389,6 +402,27 @@ stdenv0.override (
                 chmod -R u+w "$NIX_BUILD_TOP"
                 cd "$NIX_BUILD_TOP/$(cat "$NIX_BUILD_TOP/.gg-cwd")"
                 export DESTDIR="$NIX_BUILD_TOP/.gg-destdir"
+                # `export DESTDIR` alone is not enough: some packages'
+                # own Configure/Makefile (openssl's
+                # Configurations/unix-Makefile.tmpl is one) contain a
+                # plain `DESTDIR=` assignment of their own, which GNU
+                # Make's variable-precedence rules let silently
+                # override an inherited environment variable of the
+                # same name — only a value on make's OWN command line
+                # wins over that. Appended here, at ggRestorePhase
+                # RUNTIME (not baked into installFlags as a Nix
+                # string), so bash — not Nix, not make — expands
+                # $NIX_BUILD_TOP into a plain path with no literal `$`
+                # left in it: installFlags is passed straight through
+                # to make's argv, and a literal `$` there gets
+                # reinterpreted as make's OWN `$X`-style variable
+                # reference (confirmed directly, same reason this file
+                # never bakes $NIX_BUILD_TOP into installFlags via a
+                # Nix-side string either). Confirmed necessary
+                # directly: openssl's own `make install_sw` wrote
+                # straight to its literal `/nonexistent` prefix,
+                # never under $DESTDIR, until this was added.
+                installFlags="''${installFlags-} DESTDIR=$DESTDIR"
                 runHook postGgRestore
               '';
               installFlags = (orig.installFlags or "");
