@@ -91,6 +91,24 @@ type Derivation struct {
 	// Archive-only: `ar` modifier string (e.g. "rcs").
 	ARFlags string
 
+	// Link-only: a store path (or Nix path literal, in native mode)
+	// holding local, non-store, non-stub files the link line
+	// references by relative path — a linker script generated moments
+	// earlier by an unshimmed tool (e.g. openssl's `perl
+	// util/mkdef.pl > libcrypto.ld`, referenced via
+	// `-Wl,--version-script=libcrypto.ld`). The link shim reads the
+	// content at classify time (before anything downstream could turn
+	// it into a stub), stages it via stage.ContentFiles, and passes
+	// the resulting directory here — same shape as Compile's SrcStore,
+	// just for KindLink. A real derivation input (env["src"], copied
+	// in before the link command runs), NOT text embedded in the
+	// script: a large generated linker script plus hundreds of real
+	// object-file paths on one link line can exceed the kernel's argv
+	// limit if baked into the script body directly (confirmed
+	// directly against openssl's libcrypto.so.3 — "Argument list too
+	// long").
+	InlineFilesStore string
+
 	// /nix/store/… roots referenced by Flags or WrapperEnv content;
 	// must be mounted in the sandbox. Serialized as _storeDeps env var
 	// (colon-joined) and threaded into inputs.srcs (JSON mode) /
@@ -284,6 +302,20 @@ func (d *Derivation) outDir() string {
 	return "$out"
 }
 
+// inlineFilesScript renders shell that copies every file out of
+// $src (the staged directory referenced by InlineFilesStore, set via
+// the same "src" env var / derivation attribute Compile already uses
+// for its own SrcStore — see envDict/ToNix) into the build root,
+// before the link command runs. A real `cp`, not text embedded in
+// the script: see InlineFilesStore's own docstring for why (kernel
+// argv limit).
+func (d *Derivation) inlineFilesScript() string {
+	if d.InlineFilesStore == "" {
+		return ""
+	}
+	return "cp -a \"$src/.\" .\n"
+}
+
 // compilerOrAR reports which store path provides the tools on PATH.
 // Compile and Link use the compiler; Archive uses whatever supplies
 // `ar` — which native mode passes as compilerRoot and sandbox mode as
@@ -372,15 +404,15 @@ cd "$src"
 				`set -euo pipefail
 %s
 mkdir -p "%s"
-"%s" %s %s -o "%s"
-`, pathPrefix, d.outDir(), d.Tool, shellQuoteFlags(d.Flags), inputList, d.outPath())
+%s"%s" %s %s -o "%s"
+`, pathPrefix, d.outDir(), d.inlineFilesScript(), d.Tool, shellQuoteFlags(d.Flags), inputList, d.outPath())
 		}
 		return fmt.Sprintf(
 			`set -euo pipefail
 %s
 mkdir -p "%s"
-"%s" %s %s %s -o "%s"
-`, pathPrefix, d.outDir(), d.Tool, shellQuoteFlags(nonLflags), inputList, shellQuoteFlags(lflags), d.outPath())
+%s"%s" %s %s %s -o "%s"
+`, pathPrefix, d.outDir(), d.inlineFilesScript(), d.Tool, shellQuoteFlags(nonLflags), inputList, shellQuoteFlags(lflags), d.outPath())
 	case KindArchive:
 		// `ar` is taken from PATH (set above) and `D` is prepended to
 		// arFlags for a deterministic archive.
@@ -427,6 +459,9 @@ func (d *Derivation) ToNix(helpers string) string {
 		fmt.Fprintf(&b, "  markerTag      = %q;\n", tag)
 		fmt.Fprintf(&b, "  storeDepsJSON  = ''%s'';\n", jsonArrayIndented(d.StoreDeps))
 		fmt.Fprintf(&b, "  wrapperEnvJSON = ''%s'';\n", jsonObjectSorted(d.WrapperEnv))
+		if d.InlineFilesStore != "" {
+			fmt.Fprintf(&b, "  srcTree        = %s;\n", d.InlineFilesStore) // Nix path literal, unquoted
+		}
 	case KindArchive:
 		fmt.Fprintf(&b, "import %s/archiver.nix {\n", helpers)
 		fmt.Fprintf(&b, "  outName        = %q;\n", d.OutName)
@@ -575,11 +610,16 @@ func (d *Derivation) envDict() map[string]string {
 	}
 	// Compile derivations pass source/outName/src via env vars too
 	// (that's what builder.nix's script consults — see the
-	// `cd "$src"` / `"$source"` / `"$outName"` in script()).
-	if d.Kind == KindCompile {
+	// `cd "$src"` / `"$source"` / `"$outName"` in script()). Link
+	// derivations reuse the same "src" slot for InlineFilesStore, when
+	// set — see inlineFilesScript's own docstring.
+	switch {
+	case d.Kind == KindCompile:
 		env["src"] = d.SrcStore
 		env["source"] = d.Source
 		env["outName"] = d.OutName
+	case d.Kind == KindLink && d.InlineFilesStore != "":
+		env["src"] = d.InlineFilesStore
 	}
 	for k, v := range d.WrapperEnv {
 		env[k] = v

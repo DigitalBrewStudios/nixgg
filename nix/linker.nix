@@ -21,6 +21,13 @@
   markerTag,
   storeDepsJSON ? "[]",
   wrapperEnvJSON ? "{}",
+  # A staged directory of local files the link command needs present
+  # before it runs (e.g. a generated linker script referenced via
+  # -Wl,--version-script=<relpath>) — see expr.Derivation's own
+  # InlineFilesStore docstring for why this can't be embedded in the
+  # script text instead. Same Nix-path-literal convention as
+  # builder.nix's srcTree; null when the link has none.
+  srcTree ? null,
 }:
 let
   pureStorePath = import ./pure-store-path.nix;
@@ -45,4 +52,4 @@ derivation ({
   args = [ "-c" script ];
 
   _storeDeps = builtins.concatStringsSep ":" storeDeps;
-} // wrapperEnv)
+} // wrapperEnv // (if srcTree == null then { } else { src = srcTree; }))

@@ -62,14 +62,15 @@ func Link(p LinkParams) string {
 
 func linkDerivation(p LinkParams) *Derivation {
 	return &Derivation{
-		Kind:        KindLink,
-		Tool:        p.Tool,
-		OutName:     p.OutName,
-		Inputs:      inputsToDeriv(p.Inputs),
-		Flags:       p.Flags,
-		GroupInputs: p.GroupInputs,
-		StoreDeps:   p.StoreDeps,
-		WrapperEnv:  p.WrapperEnv,
+		Kind:             KindLink,
+		Tool:             p.Tool,
+		OutName:          p.OutName,
+		Inputs:           inputsToDeriv(p.Inputs),
+		Flags:            p.Flags,
+		GroupInputs:      p.GroupInputs,
+		InlineFilesStore: p.InlineFilesStore,
+		StoreDeps:        p.StoreDeps,
+		WrapperEnv:       p.WrapperEnv,
 	}
 }
 
@@ -83,8 +84,10 @@ type LinkParams struct {
 	// GroupInputs wraps the input list in --start-group/--end-group.
 	// See Derivation.GroupInputs.
 	GroupInputs bool
-	StoreDeps   []string
-	WrapperEnv  map[string]string
+	// See Derivation.InlineFilesStore.
+	InlineFilesStore string
+	StoreDeps        []string
+	WrapperEnv       map[string]string
 }
 
 // Archive builds an `ar` expression. Same Derivation-based flow.
@@ -300,11 +303,13 @@ type LinkJSONParams struct {
 	Tool        string
 	Inputs      []JSONDrvInput // per-input drv or store-path reference
 	Flags       []string
-	GroupInputs bool     // wrap inputs in --start-group/--end-group
-	StoreDeps   []string // full /nix/store/... roots referenced; joined into _storeDeps env
-	Placeholder string
-	ExtraSrcs   []string          // additional basenames for inputs.srcs (bash, coreutils, compiler)
-	Env         map[string]string // wrapper env
+	GroupInputs bool // wrap inputs in --start-group/--end-group
+	// See Derivation.InlineFilesStore.
+	InlineFilesStore string
+	StoreDeps        []string // full /nix/store/... roots referenced; joined into _storeDeps env
+	Placeholder      string
+	ExtraSrcs        []string          // additional basenames for inputs.srcs (bash, coreutils, compiler)
+	Env              map[string]string // wrapper env
 }
 
 // JSONDrvInput is one entry in a linker/archiver's input list. Either
@@ -360,19 +365,20 @@ func ArchiveJSON(p ArchiveJSONParams) JSONDrv {
 // Derivation for env/script shape.
 func LinkJSON(p LinkJSONParams) JSONDrv {
 	d := &Derivation{
-		Kind:        KindLink,
-		Name:        p.Name,
-		System:      p.System,
-		Bash:        p.Bash,
-		Coreutils:   p.Coreutils,
-		Compiler:    p.Compiler,
-		Tool:        p.Tool,
-		OutName:     p.OutName,
-		Inputs:      inputsFromJSON(p.Inputs),
-		Flags:       p.Flags,
-		GroupInputs: p.GroupInputs,
-		StoreDeps:   p.StoreDeps,
-		WrapperEnv:  p.Env,
+		Kind:             KindLink,
+		Name:             p.Name,
+		System:           p.System,
+		Bash:             p.Bash,
+		Coreutils:        p.Coreutils,
+		Compiler:         p.Compiler,
+		Tool:             p.Tool,
+		OutName:          p.OutName,
+		Inputs:           inputsFromJSON(p.Inputs),
+		Flags:            p.Flags,
+		GroupInputs:      p.GroupInputs,
+		InlineFilesStore: p.InlineFilesStore,
+		StoreDeps:        p.StoreDeps,
+		WrapperEnv:       p.Env,
 	}
 	return d.toJSON(p.ExtraSrcs, nil)
 }

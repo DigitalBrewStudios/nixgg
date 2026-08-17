@@ -551,6 +551,69 @@ func TestLinkScriptGroupWrapsInputs(t *testing.T) {
 	})
 }
 
+// TestLinkScriptStagesInlineFiles pins that InlineFilesStore (a
+// staged directory holding a linker script the link shim read off
+// disk before staging it — see shim/link.go's linkerScriptPath) gets
+// copied into the build root BEFORE the link command runs, and that
+// the flag referencing it (e.g. -Wl,--version-script=libcrypto.ld)
+// passes through unchanged — the copied file now exists at exactly
+// the relative path the flag already names. Copied via `cp`, not
+// embedded as text: a large generated linker script plus hundreds of
+// real object-file paths on one link line can exceed the kernel's
+// argv limit if baked into the script body directly (confirmed
+// directly against openssl's libcrypto.so.3 — "Argument list too
+// long").
+func TestLinkScriptStagesInlineFiles(t *testing.T) {
+	d := &Derivation{
+		Kind: KindLink, Tool: "cc", OutName: "libcrypto.so.3",
+		Coreutils: fakeCoreutils, Compiler: fakeCompiler, Bash: fakeBash,
+		Flags: []string{"-shared", "-Wl,--version-script=libcrypto.ld"},
+		Inputs: []derivInput{
+			{InputKind: "store", Ref: fakeObj, Name: "main.o"},
+		},
+		InlineFilesStore: "/nix/store/iiiiiiiiiiiiiiiiiiiiiiiiiiiiiiii-inline-libcrypto.so.3-libcrypto.ld",
+	}
+	s := d.script()
+
+	stageIdx := strings.Index(s, "cp -a")
+	linkIdx := strings.Index(s, `"cc"`)
+	if stageIdx < 0 {
+		t.Fatalf("expected inline-file staging in script:\n%s", s)
+	}
+	if linkIdx < 0 {
+		t.Fatalf("expected the link command in script:\n%s", s)
+	}
+	if stageIdx > linkIdx {
+		t.Errorf("inline file staged AFTER the link command runs — libcrypto.ld "+
+			"wouldn't exist yet:\n%s", s)
+	}
+	if !strings.Contains(s, `"$src/."`) {
+		t.Errorf("expected the staged directory to be copied from $src:\n%s", s)
+	}
+	if !strings.Contains(s, "-Wl,--version-script=libcrypto.ld") {
+		t.Errorf("the version-script flag itself must pass through unchanged "+
+			"(the file now exists at that relative path):\n%s", s)
+	}
+}
+
+// TestLinkScriptNoInlineFilesUnchanged pins that omitting
+// InlineFilesStore (the overwhelming common case — every link before
+// this feature existed) doesn't add anything to the script at all.
+func TestLinkScriptNoInlineFilesUnchanged(t *testing.T) {
+	d := &Derivation{
+		Kind: KindLink, Tool: "cc", OutName: "prog",
+		Coreutils: fakeCoreutils, Compiler: fakeCompiler, Bash: fakeBash,
+		Flags: []string{"-O2"},
+		Inputs: []derivInput{
+			{InputKind: "store", Ref: fakeObj, Name: "main.o"},
+		},
+	}
+	s := d.script()
+	if strings.Contains(s, "cp -a") {
+		t.Errorf("no InlineFilesStore was set, but the script stages one anyway:\n%s", s)
+	}
+}
+
 // TestOutSubdirAgreesWithInputSubdirFor pins the producer/consumer
 // contract for FHS placement.
 //

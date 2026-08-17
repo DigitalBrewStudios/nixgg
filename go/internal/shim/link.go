@@ -6,12 +6,14 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/tbereknyei/nixgg/internal/classify"
 	"github.com/tbereknyei/nixgg/internal/dispatch"
 	"github.com/tbereknyei/nixgg/internal/drvref"
 	"github.com/tbereknyei/nixgg/internal/expr"
 	"github.com/tbereknyei/nixgg/internal/paths"
 	"github.com/tbereknyei/nixgg/internal/realise"
 	"github.com/tbereknyei/nixgg/internal/sandbox"
+	"github.com/tbereknyei/nixgg/internal/stage"
 	"github.com/tbereknyei/nixgg/internal/storedeps"
 	"github.com/tbereknyei/nixgg/internal/thunk"
 	"github.com/tbereknyei/nixgg/internal/toolchain"
@@ -53,6 +55,52 @@ func Link(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layo
 
 	logf("link %s <- %s", output, joinBase(inputs))
 
+	// A linker-script flag (-Wl,--version-script=<path>, -Wl,-T,<path>)
+	// names a file some UNSHIMMED tool in the caller's own build wrote
+	// moments earlier (e.g. openssl's `perl util/mkdef.pl > libcrypto.ld`)
+	// — never something nixgg itself produced. The link this flag is
+	// part of runs inside its own dynamic derivation with a fresh
+	// sandbox root that never saw this file, so it has to be staged
+	// explicitly, same principle compile.go already uses for local
+	// headers (read the real bytes now, before anything downstream
+	// could turn the path into a drvref stub). If it's genuinely
+	// absent — never generated, or already something nixgg tracks a
+	// different way — fall back to passthrough rather than guessing.
+	//
+	// Staged via stage.ContentFiles + (sandbox mode only)
+	// sandbox.StoreAddScan, same as compile.go's own SrcStore — NOT
+	// embedded as text in the build script. A large generated linker
+	// script plus hundreds of real object-file paths on one link line
+	// can exceed the kernel's argv limit if baked into the script
+	// body directly (confirmed directly against openssl's
+	// libcrypto.so.3 — "Argument list too long").
+	var inlineFilesStore string
+	if path := linkerScriptPath(args); path != "" {
+		c := classify.Target(path, altStorePrefix(cfg.Store), l)
+		if c.Kind != classify.Regular {
+			logf("link passthrough: linker script %s is not a plain local file (%s)", path, c.Reason())
+			return Passthrough(realTool, args)
+		}
+		content, err := os.ReadFile(path)
+		if err != nil {
+			logf("link passthrough: linker script %s: %v", path, err)
+			return Passthrough(realTool, args)
+		}
+		id := "inline-" + filepath.Base(output) + "-" + filepath.Base(path)
+		stageDir, err := stage.ContentFiles(l, id, []stage.FileEntry{{Rel: path, Content: content}})
+		if err != nil {
+			return fmt.Errorf("stage linker script %s: %w", path, err)
+		}
+		if sandbox.Enabled() {
+			inlineFilesStore, err = sandbox.StoreAddScan(cfg, id, stageDir)
+			if err != nil {
+				return fmt.Errorf("stage linker script %s to store: %w", path, err)
+			}
+		} else {
+			inlineFilesStore = stageDir
+		}
+	}
+
 	// Classify each input.
 	altPrefix := altStorePrefix(cfg.Store)
 	linkInputs, jsonInputs, err, ok := classifyInputs(inputs, altPrefix, l, "link", func() error {
@@ -70,7 +118,7 @@ func Link(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layo
 
 	// Sandbox mode: emit JSON, submit as this outer derivation's output.
 	if sandbox.Enabled() {
-		return linkSandbox(cfg, tool, output, jsonInputs, flags, group, storeDeps, wrapperEnvJSON)
+		return linkSandbox(cfg, tool, output, jsonInputs, flags, group, inlineFilesStore, storeDeps, wrapperEnvJSON)
 	}
 
 	wrapperEnv, err := decodeStringMap(wrapperEnvJSON)
@@ -78,14 +126,15 @@ func Link(tool dispatch.Tool, args []string, cfg *toolchain.Config, l paths.Layo
 		return err
 	}
 	e := expr.Link(expr.LinkParams{
-		Helpers:     cfg.Helpers,
-		Tool:        tool.Basename(),
-		OutName:     filepath.Base(output),
-		Inputs:      linkInputs,
-		Flags:       flags,
-		GroupInputs: group,
-		StoreDeps:   storeDeps,
-		WrapperEnv:  wrapperEnv,
+		Helpers:          cfg.Helpers,
+		Tool:             tool.Basename(),
+		OutName:          filepath.Base(output),
+		Inputs:           linkInputs,
+		Flags:            flags,
+		GroupInputs:      group,
+		InlineFilesStore: inlineFilesStore,
+		StoreDeps:        storeDeps,
+		WrapperEnv:       wrapperEnv,
 	})
 
 	// Links are placeholder-mode by default: the resulting binary isn't
@@ -206,6 +255,31 @@ func parseLinkArgs(args []string) (output string, inputs, flags []string, group,
 		return "", nil, nil, false, false
 	}
 	return output, inputs, flags, group, true
+}
+
+// linkerScriptPath scans a link line for a linker-script flag and
+// returns the path it names, or "" if none is present. Handles the
+// two forms GNU ld / gcc accept: `-Wl,--version-script=<path>` /
+// `-Wl,-T,<path>` (comma-joined, passed straight through by gcc) and
+// the plain `-T <path>` / `-T<path>` forms (rare on a compiler
+// driver's own command line, but ld itself accepts them). Excludes
+// `-Ttext=`/`-Tdata=`/`-Tbss=` — same `-T` prefix, but an address
+// override, not a script path.
+func linkerScriptPath(args []string) string {
+	for i, a := range args {
+		switch {
+		case strings.HasPrefix(a, "-Wl,--version-script="):
+			return strings.TrimPrefix(a, "-Wl,--version-script=")
+		case strings.HasPrefix(a, "-Wl,-T,"):
+			return strings.TrimPrefix(a, "-Wl,-T,")
+		case a == "-T" && i+1 < len(args):
+			return args[i+1]
+		case strings.HasPrefix(a, "-T") && len(a) > 2 &&
+			!strings.HasPrefix(a, "-Ttext=") && !strings.HasPrefix(a, "-Tdata=") && !strings.HasPrefix(a, "-Tbss="):
+			return a[2:]
+		}
+	}
+	return ""
 }
 
 // resolveLibFlag checks whether any -L directory contains a
@@ -373,6 +447,7 @@ func linkSandbox(
 	inputs []expr.JSONDrvInput,
 	flags []string,
 	group bool,
+	inlineFilesStore string,
 	storeDeps []string,
 	wrapperEnvJSON string,
 ) error {
@@ -381,25 +456,30 @@ func linkSandbox(
 	if err != nil {
 		return err
 	}
+	extraSrcs := []string{
+		baseNameOf(cfg.BashRoot),
+		baseNameOf(cfg.CoreutilsRoot),
+		baseNameOf(cfg.CompilerRoot),
+	}
+	if inlineFilesStore != "" {
+		extraSrcs = append(extraSrcs, baseNameOf(inlineFilesStore))
+	}
 	drv := expr.LinkJSON(expr.LinkJSONParams{
-		Name:        "bin-" + outName,
-		OutName:     outName,
-		System:      cfg.System,
-		Bash:        cfg.BashRoot,
-		Coreutils:   cfg.CoreutilsRoot,
-		Compiler:    cfg.CompilerRoot,
-		Tool:        tool.Basename(),
-		Inputs:      inputs,
-		Flags:       flags,
-		GroupInputs: group,
-		StoreDeps:   storeDeps,
-		Placeholder: "/" + expr.OutPlaceholderNix32,
-		ExtraSrcs: []string{
-			baseNameOf(cfg.BashRoot),
-			baseNameOf(cfg.CoreutilsRoot),
-			baseNameOf(cfg.CompilerRoot),
-		},
-		Env: wrapperEnv,
+		Name:             "bin-" + outName,
+		OutName:          outName,
+		System:           cfg.System,
+		Bash:             cfg.BashRoot,
+		Coreutils:        cfg.CoreutilsRoot,
+		Compiler:         cfg.CompilerRoot,
+		Tool:             tool.Basename(),
+		Inputs:           inputs,
+		Flags:            flags,
+		GroupInputs:      group,
+		InlineFilesStore: inlineFilesStore,
+		StoreDeps:        storeDeps,
+		Placeholder:      "/" + expr.OutPlaceholderNix32,
+		ExtraSrcs:        extraSrcs,
+		Env:              wrapperEnv,
 	})
 
 	drvPath, err := sandbox.DerivationAdd(cfg, drv)

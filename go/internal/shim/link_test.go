@@ -9,6 +9,7 @@ import (
 
 	"github.com/tbereknyei/nixgg/internal/classify"
 	"github.com/tbereknyei/nixgg/internal/drvref"
+	"github.com/tbereknyei/nixgg/internal/paths"
 )
 
 // TestParseLinkArgs pins the link-line parser: which tokens are inputs
@@ -207,6 +208,35 @@ func TestIsLinkInput(t *testing.T) {
 	}
 }
 
+// TestLinkerScriptPath pins which link-line flag shapes are
+// recognized as naming a caller-local linker script (see
+// linkerScriptPath's own docstring for why these can never be
+// accelerated), and which superficially similar flags are not.
+func TestLinkerScriptPath(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		args []string
+		want string
+	}{
+		{"version-script attached", []string{"-Wl,--version-script=libcrypto.ld"}, "libcrypto.ld"},
+		{"version-script build-tree path", []string{"main.o", "-Wl,--version-script=engines/afalg.ld", "-o", "afalg.so"}, "engines/afalg.ld"},
+		{"-Wl,-T comma form", []string{"-Wl,-T,script.ld"}, "script.ld"},
+		{"separate -T", []string{"-T", "script.ld"}, "script.ld"},
+		{"attached -Tscript.ld", []string{"-Tscript.ld"}, "script.ld"},
+		{"-Ttext= is an address, not a script", []string{"-Ttext=0x1000"}, ""},
+		{"-Tdata= is an address, not a script", []string{"-Tdata=0x2000"}, ""},
+		{"-Tbss= is an address, not a script", []string{"-Tbss=0x3000"}, ""},
+		{"no linker script flag at all", []string{"main.o", "-o", "prog"}, ""},
+		{"trailing -T with no value", []string{"main.o", "-T"}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := linkerScriptPath(tc.args); got != tc.want {
+				t.Errorf("linkerScriptPath(%q) = %q, want %q", tc.args, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestParseLinkArgsSharedLibIsAnInput pins that a positional shared
 // library reaches `inputs`, not `flags`. As a flag it would be baked
 // into the drv as a bare path with no corresponding staged file.
@@ -329,6 +359,48 @@ func TestStoreInputPreservesSubpath(t *testing.T) {
 			t.Errorf("native Name = %q, want the resolved Sub, not the caller's name", ni.Name)
 		}
 	})
+}
+
+// TestClassifyInputsSonameAliasUsesRealOutputName pins the end-to-end
+// path for openssl's engines/*.so links, which reference libcrypto via
+// the plain `ln -s libcrypto.so.3 libcrypto.so` alias openssl's own
+// Makefile creates — not through -lcrypto. classify.Target resolves
+// the alias and reports the referenced drv's REAL output basename via
+// Sub; classifyInputs must use that, not the caller's own alias
+// basename, or the emitted link line reaches for
+// "<drv-out>/bin/libcrypto.so" — a file that never exists, since the
+// drv's own output is named libcrypto.so.3 — and ld fails with
+// "cannot find ...: No such file or directory".
+func TestClassifyInputsSonameAliasUsesRealOutputName(t *testing.T) {
+	drv := "/nix/store/" + strings.Repeat("a", 32) + "-bin-libcrypto.so.3.drv"
+
+	dir := t.TempDir()
+	real := filepath.Join(dir, "libcrypto.so.3")
+	if err := os.WriteFile(real, []byte(drvref.Body(drv)), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	alias := filepath.Join(dir, "libcrypto.so")
+	if err := os.Symlink(real, alias); err != nil {
+		t.Fatal(err)
+	}
+
+	_, jsonInputs, err, ok := classifyInputs([]string{alias}, "", paths.Layout{}, "link", func() error {
+		t.Fatal("should not passthrough — the alias resolves to one of our own drvref stubs")
+		return nil
+	})
+	if err != nil || !ok {
+		t.Fatalf("classifyInputs failed: ok=%v err=%v", ok, err)
+	}
+	if len(jsonInputs) != 1 {
+		t.Fatalf("got %d jsonInputs, want 1", len(jsonInputs))
+	}
+	if jsonInputs[0].Ref != drv {
+		t.Errorf("Ref = %q, want %q", jsonInputs[0].Ref, drv)
+	}
+	if jsonInputs[0].Name != "libcrypto.so.3" {
+		t.Errorf("Name = %q, want %q (the drv's real output name, not the alias %q)",
+			jsonInputs[0].Name, "libcrypto.so.3", filepath.Base(alias))
+	}
 }
 
 // TestResolveLibFlagFindsSharedLibs pins that `-lfoo` can resolve to a

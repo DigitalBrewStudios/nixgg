@@ -69,6 +69,42 @@ func Sources(l paths.Layout, tuID string, entries []Entry) (Result, error) {
 	return Result{Dir: dir, Reused: false}, nil
 }
 
+// FileEntry pairs a relative staging path with the exact bytes that
+// should exist there. Content is already in memory (the caller read
+// it off disk itself, before anything downstream could turn the
+// source into a stub) — this just writes it out, unconditionally,
+// under a caller-chosen ID.
+type FileEntry struct {
+	Rel     string
+	Content []byte
+}
+
+// ContentFiles materialises `entries` into l.Srcs/id/ by writing bytes
+// directly — no hardlinking, since there's no original file on disk
+// this content is guaranteed to still match (the caller already read
+// it once; re-reading later could race with whatever generated it).
+// Always rewrites; content this small doesn't benefit from the
+// inode-reuse dance Sources does for real source trees.
+func ContentFiles(l paths.Layout, id string, entries []FileEntry) (string, error) {
+	dir := filepath.Join(l.Srcs, id)
+	if err := os.RemoveAll(dir); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return "", err
+	}
+	for _, e := range entries {
+		dst := filepath.Join(dir, e.Rel)
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return "", err
+		}
+		if err := os.WriteFile(dst, e.Content, 0o644); err != nil {
+			return "", err
+		}
+	}
+	return dir, nil
+}
+
 // reuseOK returns true iff dir has exactly the requested entries, each
 // hardlinked to its current original.
 func reuseOK(dir string, entries []Entry) bool {
