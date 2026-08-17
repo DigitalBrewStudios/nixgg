@@ -28,6 +28,21 @@ type BuildParams struct {
 // output — found via the same convention link.go/archive.go use
 // (expr.ArtifactSubdir, keyed on the stub's basename): flat for a .o,
 // lib/ for a .a, bin/ for anything else.
+//
+// The script text goes into Env["buildScript"] + passAsFile, not
+// Args, once there are enough stubs: a large build (openssl: 2230
+// stubs) makes a `cp -a <placeholder> "$out/<relpath>"` line per
+// stub, and passing the resulting multi-hundred-KB string as
+// `args = ["-c", script]` makes exec's own argv+envp block exceed the
+// kernel's ARG_MAX — confirmed directly ("Argument list too long").
+// passAsFile is a core Nix mechanism for exactly this (see the Nix
+// manual's "advanced attributes"): it writes an env var's value —
+// with any CA output placeholders inside it substituted exactly as
+// they would be anywhere else in the derivation — to a file at build
+// time and exposes that file's path via `${name}Path`, instead of
+// ever putting the value on the builder's argv. Args itself now
+// carries only a short, fixed `source "$buildScriptPath"` regardless
+// of stub count.
 func Build(p BuildParams) expr.JSONDrv {
 	drvs := map[string]expr.JSONDrvRef{}
 	srcs := []string{expr.StoreBasename(p.Bash), expr.StoreBasename(p.Coreutils), p.TreeSrc}
@@ -60,7 +75,7 @@ func Build(p BuildParams) expr.JSONDrv {
 		Name:    p.Name,
 		System:  p.System,
 		Builder: p.Bash + "/bin/bash",
-		Args:    []string{"-c", script.String()},
+		Args:    []string{"-c", `source "$buildScriptPath"`},
 		Env: map[string]string{
 			"out":            "/" + expr.OutPlaceholderNix32,
 			"name":           p.Name,
@@ -68,6 +83,8 @@ func Build(p BuildParams) expr.JSONDrv {
 			"builder":        p.Bash + "/bin/bash",
 			"outputHashAlgo": "sha256",
 			"outputHashMode": "nar",
+			"passAsFile":     "buildScript",
+			"buildScript":    script.String(),
 		},
 		Inputs: expr.JSONDrvInputs{
 			Drvs: drvs,

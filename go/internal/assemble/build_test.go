@@ -1,6 +1,7 @@
 package assemble
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -34,7 +35,19 @@ func TestBuildReferencesEachStubOnce(t *testing.T) {
 		}
 	}
 
-	script := drv.Args[1]
+	// Args must be a short, fixed string regardless of stub count — see
+	// Build's own docstring for why (the kernel's ARG_MAX, confirmed
+	// directly against openssl's 2230-stub build). The actual script
+	// content lives in Env["buildScript"], staged to a file at build
+	// time via passAsFile.
+	if len(drv.Args) != 2 || drv.Args[0] != "-c" {
+		t.Fatalf("Args = %v, want [\"-c\", ...]", drv.Args)
+	}
+	if drv.Env["passAsFile"] != "buildScript" {
+		t.Errorf("Env[passAsFile] = %q, want %q", drv.Env["passAsFile"], "buildScript")
+	}
+
+	script := drv.Env["buildScript"]
 	// .o artifacts stay flat inside their producing drv's $out
 	// (expr.ArtifactSubdir's documented rule) — the cp source must NOT
 	// insert a bin/ or lib/ segment for the compile-drv case.
@@ -64,7 +77,7 @@ func TestBuildRestoresTreeBeforeOverlayingStubs(t *testing.T) {
 		Coreutils: "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-coreutils",
 		TreeSrc:   "cccccccccccccccccccccccccccccccc-gg-tree-hello-tree",
 	})
-	script := drv.Args[1]
+	script := drv.Env["buildScript"]
 	restoreIdx := strings.Index(script, "cp -a \"/nix/store/cccccccccccccccccccccccccccccccc-gg-tree-hello-tree/.\"")
 	if restoreIdx < 0 {
 		t.Fatalf("script doesn't restore the captured tree:\n%s", script)
@@ -88,6 +101,44 @@ func TestBuildDedupesRepeatedStubDrv(t *testing.T) {
 	})
 	if len(drv.Inputs.Drvs) != 1 {
 		t.Fatalf("expected exactly 1 deduped drv input, got %d: %+v", len(drv.Inputs.Drvs), drv.Inputs.Drvs)
+	}
+}
+
+// TestBuildArgsStaySmallAtScale pins the actual fix for openssl's
+// "Argument list too long" failure: with enough stubs, Args must stay
+// a short, fixed string — the real script content has to move to
+// Env["buildScript"] (passAsFile), never grow Args itself, no matter
+// how many stubs there are.
+func TestBuildArgsStaySmallAtScale(t *testing.T) {
+	stubs := make([]Stub, 2230) // openssl's real count when this broke
+	for i := range stubs {
+		stubs[i] = Stub{
+			RelPath: fmt.Sprintf("crypto/libcrypto-lib-obj%d.o", i),
+			DrvPath: fmt.Sprintf("/nix/store/%032x-tu-obj%d.o.drv", i, i),
+		}
+	}
+	drv := Build(BuildParams{
+		Name:      "gg-tree-openssl",
+		System:    "x86_64-linux",
+		Bash:      "/nix/store/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa-bash",
+		Coreutils: "/nix/store/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb-coreutils",
+		TreeSrc:   "cccccccccccccccccccccccccccccccc-gg-tree-openssl-tree",
+		Stubs:     stubs,
+	})
+
+	const argMax = 2 * 1024 * 1024 // getconf ARG_MAX on a typical Linux box
+	argvSize := 0
+	for _, a := range drv.Args {
+		argvSize += len(a)
+	}
+	if argvSize > 4096 {
+		t.Errorf("Args total %d bytes across %d stubs — want a small, fixed size regardless of stub count", argvSize, len(stubs))
+	}
+	if argvSize >= argMax {
+		t.Fatalf("Args total %d bytes exceeds ARG_MAX (%d) — this is exactly the bug", argvSize, argMax)
+	}
+	if len(drv.Env["buildScript"]) == 0 {
+		t.Fatal("Env[buildScript] is empty — the script content has to live somewhere")
 	}
 }
 
