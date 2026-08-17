@@ -1,0 +1,66 @@
+name: smoke
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    # smoke.sh's quick set is ~2 min plus the two cutoff scripts —
+    # generous headroom over a cold cache-miss run, well under
+    # GitHub's 6h default so a hang fails fast instead of burning
+    # the whole job queue.
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@v22
+
+      # One-time build of the builder-rpc-v0-capable Nix this flake
+      # pins (see README.md's "Requirements" section) — substituted
+      # from cache.nixos.org, not built from source. --accept-flake-config
+      # avoids relying on ambient trust state: CI has no TTY to prompt
+      # in, and accept-flake-config defaults to false.
+      - name: Build patched-nix
+        run: nix build --no-eval-cache --accept-flake-config .#patched-nix -o .patched-nix
+
+      # tests/smoke.sh's own quick set: every example builds, its
+      # artifact lands at the FHS path it should, and it runs. Does
+      # NOT include EXAMPLES=all's redis/ffmpeg/llvm (too slow for
+      # every push/PR) or tests/drv-equivalence.sh (a separate,
+      # slower invariant check — see the drv-equivalence job below).
+      - name: Run smoke tests
+        run: PATCHED_NIX="$PWD/.patched-nix" bash tests/smoke.sh
+
+      # Early-cutoff proofs for both configure-caching mechanisms —
+      # these check the CACHING MECHANISM (does an excluded-file edit
+      # actually skip a rebuild), which tests/smoke.sh's build+run
+      # checks can't catch on their own.
+      - name: Run configure-cache-cutoff tests
+        run: PATCHED_NIX="$PWD/.patched-nix" bash tests/configure-cache-cutoff.sh
+
+      - name: Run dyndrv-configure-cache-cutoff test
+        run: PATCHED_NIX="$PWD/.patched-nix" bash tests/dyndrv-configure-cache-cutoff.sh
+
+  drv-equivalence:
+    runs-on: ubuntu-latest
+    # ONLY=hello is ~35s of build time; generous headroom for a
+    # cold cache miss.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: DeterminateSystems/nix-installer-action@v22
+
+      - name: Build patched-nix
+        run: nix build --no-eval-cache --accept-flake-config .#patched-nix -o .patched-nix
+
+      # The core invariant this repo exists to prove: native and
+      # sandbox mode produce byte-identical drvs. ONLY=hello keeps
+      # this to the ~35s smoke of the same machinery — the full
+      # 149-drv sweep (lua/fmt/mosh/gcc too) is for local/manual runs,
+      # not every push.
+      - name: Run drv-equivalence (hello only)
+        run: PATCHED_NIX="$PWD/.patched-nix" ONLY=hello bash tests/drv-equivalence.sh
