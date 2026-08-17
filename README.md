@@ -338,6 +338,57 @@ phase 2, mostly for symmetry: phase 2 *is* reachable via an ordinary
 `.overrideAttrs` on the returned package (confirmed directly — only
 phase 1 has the reapplication problem).
 
+### Measured incremental-rebuild cost
+
+Per-TU acceleration only pays off when most translation units are
+actually unchanged. Two real measurements against openssl (`~2200`
+translation units) through `dynDrvStdenv`, both using
+`pkgs.openssl.override { stdenv = dynDrvStdenv { stdenv = pkgs.stdenv; }; }`
+as the baseline already built once:
+
+| Scenario | What changed | TUs recompiled | TUs reused from cache | Non-TU drvs freshly built |
+|---|---|---|---|---|
+| Baseline (cold) | first build of 3.6.3 | 2213 / 2213 | 0 | everything |
+| One-file patch (the CI case) | one real declaration added to `crypto/mem.c`, via `extraPhase1Attrs`'s `postPatch` | 2 / 2213 (`tu-libcrypto-lib-mem.o`, `tu-libcrypto-shlib-mem.o` — both build units the one changed file feeds) | 2211 / 2213 (99.9%) | 13, ALL with a hash never seen in the baseline build (verified: zero overlap between the two runs' "actually built" drv sets) — the 7 engine `.so`s and `bin-libssl.so.3`/`bin-libcrypto.so.3`/`bin-openssl` that link against the changed object, plus the outer `openssl-3.6.3.drv`/`gg-build-openssl-3.6.3.drv` wrapper drvs |
+| Version bump (3.6.3 → 3.5.7) | full release bump, same package | 2153 / 2192 (98%) | 39 / 2192 (2%, all perl-generated x86_64 asm — `aesni-*`, `rsaz-*`, `md5-x86_64`, `wp-x86_64`, plus one templated `.c`) | effectively everything |
+
+The one-file-patch case is the realistic CI scenario this project
+targets: a security patch or small bugfix lands on an unchanged
+release, and only the 2 touched translation units — out of 2213 total
+— need to actually run a compiler; everything else is a build-trace
+cache hit. The 13 non-TU drvs that DO rebuild (the shared libs/
+binaries that link against the changed object, plus the wrapper drvs)
+are expected to — real, correct propagation of a real content change,
+verified by diffing the exact set of drv hashes actually built in each
+run (no overlap: nothing in the patched run re-does work the baseline
+run had already done, and nothing that should be invalidated survives
+untouched). An earlier pass at this measurement patched in only a
+comment line; GCC emits nothing for a comment, so the resulting `.o`
+was byte-for-byte identical to the unpatched one via `nix path-info`
+and the whole test measured nothing — fixed by adding a real
+file-scope declaration instead. The version-bump case is the negative
+result: openssl's own `Configure` step bakes its version number into
+`opensslv.h`, a header nearly every `.c` file transitively includes, so
+almost nothing survives a release bump byte-for-byte even though most
+of the source is unchanged text. Per-TU content addressing can't
+distinguish "this file's content changed because of a real edit" from
+"this file's content changed because something it includes changed" —
+both invalidate the cache, so the *win size* depends entirely on how
+narrow the actual diff's *object-level* footprint is, not how many
+lines of source changed.
+survives a release bump byte-for-byte even though most of the source
+is unchanged text. Per-TU content addressing can't distinguish "this
+file's content changed because of a real edit" from "this file's
+content changed because something it includes changed" — both
+invalidate the cache, so the *win size* depends entirely on how narrow
+the actual diff's *object-level* footprint is, not how many lines of
+source changed.
+
+See `~/nixgg-example`'s `flake.nix` (a separate flake using this repo
+as a library, not part of this repository) for the three openssl
+variants these numbers came from: `openssl-dyndrv`,
+`openssl-3-5-dyndrv`, and `openssl-dyndrv-patched`.
+
 ## Cache an existing package's configure step
 
 `dynDrvStdenv` accelerates the whole build/install split. Sometimes
