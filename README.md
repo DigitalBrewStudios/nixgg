@@ -338,6 +338,25 @@ phase 2, mostly for symmetry: phase 2 *is* reachable via an ordinary
 `.overrideAttrs` on the returned package (confirmed directly — only
 phase 1 has the reapplication problem).
 
+If you already have a package built through `dynDrvStdenv` and want
+to patch phase 1 without rebuilding the `dynDrvStdenv { ...; }` call
+site, use `.overridePhase1Attrs` — a `passthru` on the returned
+package with the same `finalAttrs: old: old // {...}` shape as
+`extraPhase1Attrs`, composing on top of it:
+
+```nix
+(pkgs.openssl.override { stdenv = dynDrvStdenv; }).overridePhase1Attrs (
+  finalAttrs: old: old // {
+    postPatch = old.postPatch + "sed -i ... crypto/mem.c\n";
+  }
+)
+```
+
+Same underlying cost as rebuilding the `dynDrvStdenv { ...; }` call
+site with an `extraPhase1Attrs` — phase 1 is reconstructed either
+way, by construction — just without hand-building a second
+`dynDrvStdenv` instance to get there.
+
 ### Measured incremental-rebuild cost
 
 Per-TU acceleration only pays off when most translation units are
@@ -349,7 +368,7 @@ as the baseline already built once:
 | Scenario | What changed | TUs recompiled | TUs reused from cache | Non-TU drvs freshly built |
 |---|---|---|---|---|
 | Baseline (cold) | first build of 3.6.3 | 2213 / 2213 | 0 | everything |
-| One-file patch (the CI case) | one real declaration added to `crypto/mem.c`, via `extraPhase1Attrs`'s `postPatch` | 2 / 2213 (`tu-libcrypto-lib-mem.o`, `tu-libcrypto-shlib-mem.o` — both build units the one changed file feeds) | 2211 / 2213 (99.9%) | 13, ALL with a hash never seen in the baseline build (verified: zero overlap between the two runs' "actually built" drv sets) — the 7 engine `.so`s and `bin-libssl.so.3`/`bin-libcrypto.so.3`/`bin-openssl` that link against the changed object, plus the outer `openssl-3.6.3.drv`/`gg-build-openssl-3.6.3.drv` wrapper drvs |
+| One-file patch (the CI case) | one real declaration added to `crypto/mem.c`, via `.overridePhase1Attrs`'s `postPatch` | 2 / 2213 (`tu-libcrypto-lib-mem.o`, `tu-libcrypto-shlib-mem.o` — both build units the one changed file feeds) | 2211 / 2213 (99.9%) | 13, ALL with a hash never seen in the baseline build (verified: zero overlap between the two runs' "actually built" drv sets) — the 7 engine `.so`s and `bin-libssl.so.3`/`bin-libcrypto.so.3`/`bin-openssl` that link against the changed object, plus the outer `openssl-3.6.3.drv`/`gg-build-openssl-3.6.3.drv` wrapper drvs |
 | Version bump (3.6.3 → 3.5.7) | full release bump, same package | 2153 / 2192 (98%) | 39 / 2192 (2%, all perl-generated x86_64 asm — `aesni-*`, `rsaz-*`, `md5-x86_64`, `wp-x86_64`, plus one templated `.c`) | effectively everything |
 
 The one-file-patch case is the realistic CI scenario this project
