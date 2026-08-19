@@ -550,6 +550,15 @@
                 src = llvm-src;
               };
             };
+            # Rust example - demonstrates nixgg's ability to accelerate
+            # Rust builds using Cargo
+            rust = {
+              dir = ./examples/rust;
+              args = {
+                inherit (pkgs) rustc cargo pkg-config;
+                src = pkgs.lib.cleanSource ./.;
+              };
+            };
           };
 
           # name -> the example's full attrset (.result, .shell, extras).

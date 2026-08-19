@@ -71,7 +71,7 @@ Flake packages currently exposed:
   (dynamic derivation). Built on top of `stdenv.mkDerivation`, so
   `buildInputs` / `nativeBuildInputs` / `propagatedBuildInputs` and
   standard setup hooks (cmake, autoreconf, pkg-config) Just Work.
-- `hello`, `lua`, `fmt`, `mosh`, `redis`, `ffmpeg`, `two-phase`,
+- `hello`, `lua`, `fmt`, `mosh`, `redis`, `ffmpeg`, `rust`, `two-phase`,
   `llvm` — concrete call sites of `mkNixggBuild`, exposed as
   `.package`: a real derivation, so `nix build`/`nix run`/
   `nix profile install` all work normally. `.#<name>.result` reaches

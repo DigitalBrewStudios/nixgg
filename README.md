@@ -39,6 +39,7 @@ nix run .#hello
 nix build .#lua         # lua 5.4.7 — 32 TUs, 1 archive, 1 link
 nix build .#fmt         # {fmt} 11.0.2 — cmake + ninja + libfmt.a
 nix build .#mosh        # mosh unstable — autoconf + protobuf + openssl/ncurses/zlib
+nix build .#rust        # Rust example — cargo + rustc
 ```
 
 Both modes produce byte-identical `.drv` files. `nix build .#lua`
@@ -185,7 +186,7 @@ Stock Nix is fine for nixgg's **native** mode (thunks on disk, one
 `mkNixggBuild` result, which is sandbox mode.
 
 See `examples/*/default.nix` for real-world call sites (lua, {fmt},
-mosh, redis, ffmpeg, and a 3-phase LLVM build). If your build execs one
+mosh, redis, ffmpeg, rust, and a 3-phase LLVM build). If your build execs one
 of its own binaries mid-build — codegen and bootstrap tools do this —
 read `examples/llvm/default.nix`: that needs two or more chained
 `mkNixggBuild` calls, since a not-yet-realised output can't be run.
