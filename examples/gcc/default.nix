@@ -52,18 +52,26 @@
   mkNixggBuild,
   src,
 }:
+{
+  phase-1 = mkNixggBuild {
+    pname = "";
+    version = "15.3.0";
+    inherit src;
+  };
 
-mkNixggBuild {
-  pname = "gcc-libiberty";
-  version = "15.3.0";
-  inherit src;
-  # mkNixggBuild picks the "ar-" drv-name prefix for any target
-  # ending in ".a" (fmt's libfmt.a is the existing precedent for an
-  # archive-only, no-link target).
-  target = "libiberty.a";
-  buildCommand = ''
-    cd libiberty
-    NIXGG_BYPASS=1 ./configure --disable-shared
-    make -j"$NIX_BUILD_CORES"
-  '';
+  phase2 = mkNixggBuild {
+    pname = "gcc-libiberty";
+    version = "15.3.0";
+    inherit src;
+    # mkNixggBuild picks the "ar-" drv-name prefix for any target
+    # ending in ".a" (fmt's libfmt.a is the existing precedent for an
+    # archive-only, no-link target).
+    target = "libiberty.a";
+    buildCommand = ''
+      cd libiberty
+      NIXGG_BYPASS=1 ./configure --disable-shared
+      make -j"$NIX_BUILD_CORES"
+    '';
+  };
+
 }
